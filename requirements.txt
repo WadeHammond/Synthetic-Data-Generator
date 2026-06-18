@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+duckdb
+pandas
+openpyxl
+pyarrow
+litellm

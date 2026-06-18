@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>TDG — Tailored Data Generation</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .spinner { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .fade-in { animation: fadeIn 0.35s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .tab-btn.active { background: white; color: #C4522A; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+  .fmt-pill { transition: all .15s; user-select: none; cursor: pointer; }
+  .fmt-pill.active-csv,
+  .fmt-pill.active-json,
+  .fmt-pill.active-parquet,
+  .fmt-pill.active-txt,
+  .fmt-pill.active-xlsx    { background:#D8DCE8; border-color:#121a38; color:#121a38; }
+  .badge-csv,.badge-json,.badge-parquet,.badge-txt,.badge-xlsx
+                           { background:#D8DCE8; color:#121a38; border:1px solid #121a38; }
+  .dl-btn-csv,.dl-btn-json,.dl-btn-parquet,.dl-btn-txt,.dl-btn-xlsx
+                           { border-color:#121a38; color:#121a38; }
+  .dl-btn-csv:hover,.dl-btn-json:hover,.dl-btn-parquet:hover,
+  .dl-btn-txt:hover,.dl-btn-xlsx:hover { background:#D8DCE8; }
+  .stat-blue  { background:#D8DCE8; border:1px solid #121a38; color:#121a38; }
+  .stat-cyan  { background:#D8DCE8; border:1px solid #121a38; color:#121a38; }
+  .stat-navy  { background:#D8DCE8; border:1px solid #121a38; color:#121a38; }
+  .stat-warm  { background:#FDE4D6; border:1px solid #d35d35; color:#8F3A1E; }
+  .quality-pill { transition: all .15s; cursor: pointer; border-radius: 8px; }
+  .quality-pill.selected { background: white; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+<!-- ── Header ─────────────────────────────────────────────────────── -->
+<header class="shadow-lg" style="background:#C4522A;">
+  <div class="max-w-5xl mx-auto px-6 py-4 flex items-center gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg border-2 border-white/80 bg-white/10 flex items-center justify-center shadow">
+        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
+          <ellipse cx="12" cy="6" rx="8" ry="3" stroke="currentColor" stroke-width="1.75" fill="none"/>
+          <path stroke-linecap="round" d="M4 6v4c0 1.657 3.582 3 8 3s8-1.343 8-3V6"/>
+          <path stroke-linecap="round" d="M4 10v4c0 1.657 3.582 3 8 3s8-1.343 8-3v-4"/>
+          <path stroke-linecap="round" d="M4 14v4c0 1.657 3.582 3 8 3s8-1.343 8-3v-4"/>
+        </svg>
+      </div>
+      <div>
+        <span class="text-white font-bold italic text-xl tracking-tight">TDG</span>
+        <span class="text-white/70 text-sm ml-2">Tailored Data Generation</span>
+      </div>
+    </div>
+    <div class="ml-auto">
+      <span id="modeTag" class="text-xs font-medium px-2 py-1 rounded-full bg-white/20 text-white border border-white/30">MOCK MODE</span>
+    </div>
+  </div>
+</header>
+
+<!-- ── Step bar ────────────────────────────────────────────────────── -->
+<div class="max-w-5xl mx-auto px-6 pt-6">
+  <ol class="flex items-center gap-0 text-sm" id="stepBar">
+    <li class="flex items-center" id="step1">
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-full font-medium" style="background:#FDE8DF;color:#C4522A;">
+        <span class="w-5 h-5 rounded-full text-white text-xs flex items-center justify-center font-bold" style="background:#C4522A;">1</span>
+        Configure
+      </div>
+      <div class="w-8 h-px bg-slate-300 mx-1"></div>
+    </li>
+    <li class="flex items-center" id="step2">
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-400 font-medium">
+        <span class="w-5 h-5 rounded-full bg-slate-300 text-white text-xs flex items-center justify-center font-bold">2</span>
+        Generate
+      </div>
+      <div class="w-8 h-px bg-slate-300 mx-1"></div>
+    </li>
+    <li class="flex items-center" id="step3">
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-400 font-medium">
+        <span class="w-5 h-5 rounded-full bg-slate-300 text-white text-xs flex items-center justify-center font-bold">3</span>
+        Explore Results
+      </div>
+    </li>
+  </ol>
+</div>
+
+<!-- ── Main ────────────────────────────────────────────────────────── -->
+<main class="max-w-5xl mx-auto px-6 py-5 space-y-5">
+
+  <!-- ── Company Context card ──────────────────────────────────────── -->
+  <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-lg flex items-center justify-center" style="background:#FDE8DF;">
+          <svg class="w-4 h-4" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21"/>
+          </svg>
+        </div>
+        <h2 class="text-base font-semibold text-slate-800">Company Context</h2>
+        <span class="text-xs font-medium px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full">Optional</span>
+      </div>
+      <button onclick="toggleContextCard()" id="contextToggleBtn"
+        class="text-xs text-slate-400 hover:text-slate-600 transition-colors flex items-center gap-1">
+        <span id="contextToggleLabel">Expand</span>
+        <svg id="contextChevron" class="w-3.5 h-3.5 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Collapsed preview (shown when collapsed + context set) -->
+    <div id="contextPreview" class="hidden">
+      <div class="flex items-center gap-2 py-1">
+        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background:#C4522A;"></span>
+        <span id="contextPreviewText" class="text-sm text-slate-600 truncate"></span>
+        <button onclick="toggleContextCard()" class="text-xs hover:underline ml-auto flex-shrink-0" style="color:#C4522A;">Edit</button>
+      </div>
+    </div>
+
+    <!-- Expanded body -->
+    <div id="contextBody" class="hidden space-y-4">
+      <!-- Company name -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Company Name</label>
+        <input id="companyName" type="text" placeholder="e.g. Acme Health Systems"
+          oninput="onCompanyNameChange()"
+          class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A] placeholder-slate-300"/>
+      </div>
+
+      <!-- Input mode toggle -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Company Description</label>
+        <div class="inline-flex items-center bg-slate-100 p-1 rounded-xl gap-1 mb-3">
+          <button id="modeType" onclick="setCtxMode('type')"
+            class="quality-pill selected px-3 py-1.5 text-xs font-medium text-slate-700 flex items-center gap-1.5">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"/></svg>
+            Type it
+          </button>
+          <button id="modeUpload" onclick="setCtxMode('upload')"
+            class="quality-pill px-3 py-1.5 text-xs font-medium text-slate-500 flex items-center gap-1.5">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+            Upload a file
+          </button>
+        </div>
+
+        <!-- Type mode -->
+        <div id="ctxTypeArea">
+          <textarea id="companyContext" rows="4"
+            placeholder="Describe what your company does, its size, key focus areas, or any relevant details that should shape the generated data and analysis...&#10;&#10;e.g. We are a regional hospital network in the Pacific Northwest serving 250,000 patients annually, focused on cardiology and oncology."
+            oninput="onContextChange()"
+            class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A] placeholder-slate-300 resize-none leading-relaxed"></textarea>
+          <div class="flex justify-between mt-1">
+            <span class="text-xs text-slate-400">The more detail you provide, the more tailored the results</span>
+            <span id="ctxCharCount" class="text-xs text-slate-400">0 / 2000</span>
+          </div>
+        </div>
+
+        <!-- Upload mode -->
+        <div id="ctxUploadArea" class="hidden">
+          <div id="ctxDropZone"
+            ondragover="ctxDragOver(event)" ondragleave="ctxDragLeave(event)" ondrop="ctxDrop(event)"
+            onclick="document.getElementById('ctxFileInput').click()"
+            class="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center cursor-pointer transition-all" style="hover handled in JS" onmouseover="this.style.borderColor='#C4522A';this.style.background='rgba(196,82,42,0.04)'" onmouseout="this.style.borderColor='';this.style.background=''">
+            <svg class="w-8 h-8 text-slate-300 mx-auto mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m6.75 12l-3-3m0 0l-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
+            </svg>
+            <p class="text-sm text-slate-500 font-medium">Drop a file or click to browse</p>
+            <p class="text-xs text-slate-400 mt-1">TXT, MD, PDF, DOCX — company overview, brief, or description</p>
+          </div>
+          <input type="file" id="ctxFileInput" class="hidden" accept=".txt,.md,.pdf,.docx,.csv"
+            onchange="ctxFileSelected(event)"/>
+          <div id="ctxFileStatus" class="hidden mt-3 p-3 rounded-xl text-sm" style="background:#FDE8DF;border:1px solid #F5C4B3;">
+            <div class="flex items-center justify-between mb-1">
+              <span id="ctxFileName" class="font-medium text-xs" style="color:#8B3515;"></span>
+              <button onclick="clearCtxFile()" class="text-xs text-slate-400 hover:text-red-500">Clear</button>
+            </div>
+            <p id="ctxFilePreview" class="text-xs text-slate-600 leading-relaxed line-clamp-3"></p>
+            <p id="ctxFileChars" class="text-xs text-slate-400 mt-1"></p>
+          </div>
+          <div id="ctxFileError" class="hidden mt-2 text-xs text-red-600 px-1"></div>
+          <div id="ctxFileLoading" class="hidden mt-3 flex items-center gap-2 text-xs text-slate-500">
+            <svg class="spinner w-3.5 h-3.5" style="color:#C4522A;" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Extracting text…
+          </div>
+        </div>
+      </div>
+
+      <!-- Clear button -->
+      <div class="flex justify-end">
+        <button onclick="clearContext()" class="text-xs text-slate-400 hover:text-slate-600 transition-colors">
+          Clear context
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Config panel ─────────────────────────────────────────────── -->
+  <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+    <h2 class="text-base font-semibold text-slate-800 mb-5">Configure Data Generation</h2>
+
+    <!-- Data Source toggle -->
+    <div class="mb-5">
+      <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Data Source</label>
+      <div class="inline-flex items-center bg-slate-100 p-1 rounded-xl gap-1 mb-3">
+        <button id="srcAI" onclick="setGenMode('ai')"
+          class="quality-pill selected px-4 py-2 text-sm font-medium text-slate-700 flex items-center gap-2">
+          <svg class="w-3.5 h-3.5" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+          AI Generate
+        </button>
+        <button id="srcSDV" onclick="setGenMode('upload')"
+          class="quality-pill px-4 py-2 text-sm font-medium text-slate-500 flex items-center gap-2">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+          Upload &amp; Scale
+        </button>
+      </div>
+
+      <!-- SDV upload section (shown when genMode === 'upload') -->
+      <div id="sdvUploadSection" class="hidden space-y-3">
+        <!-- Drop zone -->
+        <div id="sdvDropZone"
+          ondragover="sdvDragOver(event)" ondragleave="sdvDragLeave(event)" ondrop="sdvDrop(event)"
+          onclick="document.getElementById('sdvFileInput').click()"
+          onmouseover="this.style.borderColor='#C4522A';this.style.background='rgba(196,82,42,0.04)'"
+          onmouseout="this.style.borderColor='';this.style.background=''"
+          class="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center cursor-pointer transition-all">
+          <svg class="w-8 h-8 text-slate-300 mx-auto mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+          </svg>
+          <p class="text-sm text-slate-500 font-medium">Drop CSV or Excel files here, or click to browse</p>
+          <p class="text-xs text-slate-400 mt-1">CSV, XLSX — one or more tables to scale up</p>
+        </div>
+        <input type="file" id="sdvFileInput" class="hidden" accept=".csv,.xlsx,.xls,.json,.parquet" multiple
+          onchange="sdvFilesSelected(event)"/>
+
+        <!-- File list -->
+        <div id="sdvFileList" class="hidden space-y-1.5"></div>
+
+        <!-- Target rows -->
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Target Rows per Table</label>
+          <select id="sdvTargetRows"
+            class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+            <option value="100">100 rows</option>
+            <option value="500">500 rows</option>
+            <option value="1000" selected>1,000 rows</option>
+            <option value="5000">5,000 rows</option>
+            <option value="10000">10,000 rows</option>
+            <option value="50000">50,000 rows</option>
+            <option value="100000">100,000 rows</option>
+          </select>
+          <span class="text-xs text-slate-400">SDV learns your data's patterns and generates this many rows</span>
+        </div>
+
+        <!-- Epochs -->
+        <div class="flex items-center gap-3 flex-wrap mt-3">
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Training Quality</label>
+          <select id="sdvEpochs"
+            class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+            <option value="50" selected>Recommended — 50 epochs</option>
+            <option value="100">High quality — 100 epochs</option>
+            <option value="200">High quality — 200 epochs</option>
+            <option value="300">Best quality — 300 epochs</option>
+          </select>
+          <span class="text-xs text-slate-400">More epochs = more realistic data</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
+      <!-- Industry -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Industry</label>
+        <select id="industrySelect"
+          class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+        </select>
+      </div>
+      <!-- Model -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">LLM Model</label>
+        <select id="modelSelect"
+          class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+        </select>
+      </div>
+    </div>
+
+    <!-- AI-only config sections (hidden in upload mode) -->
+    <div id="aiOnlySections">
+
+    <!-- Scale up with SDV (AI → SDV pipeline) -->
+    <div class="mb-5 rounded-xl border border-slate-200 p-4" style="background:rgba(196,82,42,0.03);">
+      <div class="flex items-center gap-3 mb-1">
+        <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Scale up with SDV</label>
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" id="aiScaleToggle" class="sr-only peer" onchange="toggleAiScale()">
+          <div class="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-[#C4522A] after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+        </label>
+        <span class="text-xs text-slate-400" id="aiScaleStatus">Off — AI generates the rows directly</span>
+      </div>
+      <p class="text-xs text-slate-500 mb-3">When on, the AI generates a small realistic seed dataset and SDV scales it up to thousands of rows — combining AI realism with SDV volume.</p>
+      <div id="aiScaleOptions" class="hidden flex items-center gap-3 flex-wrap">
+        <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Target Rows</label>
+        <select id="aiScaleRows"
+          class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+          <option value="500">500 rows</option>
+          <option value="1000" selected>1,000 rows</option>
+          <option value="5000">5,000 rows</option>
+          <option value="10000">10,000 rows</option>
+          <option value="50000">50,000 rows</option>
+        </select>
+        <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Quality</label>
+        <select id="aiScaleEpochs"
+          class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+          <option value="50" selected>Recommended — 50 epochs</option>
+          <option value="100">High quality — 100 epochs</option>
+          <option value="200">Best — 200 epochs</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Data Quality toggle -->
+    <div class="mb-5">
+      <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Data Quality Mode</label>
+      <div class="inline-flex items-center bg-slate-100 p-1 rounded-xl gap-1">
+        <button id="pillClean" onclick="setMessy(false)"
+          class="quality-pill selected px-4 py-2 text-sm font-medium text-slate-700 flex items-center gap-2">
+          <svg class="w-3.5 h-3.5" style="color:#0058ab;" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          Clean Data
+        </button>
+        <button id="pillMessy" onclick="setMessy(true)"
+          class="quality-pill px-4 py-2 text-sm font-medium text-slate-500 flex items-center gap-2">
+          <svg class="w-3.5 h-3.5 text-amber-500" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+          Messy + Cleaning Demo
+        </button>
+      </div>
+      <p id="qualityHint" class="text-xs text-slate-400 mt-1.5">Column names are already clean snake_case — no normalization needed.</p>
+    </div>
+
+    <!-- Data Size -->
+    <div class="mb-5">
+      <div class="flex items-center justify-between mb-2">
+        <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Data Size</label>
+        <div class="inline-flex items-center bg-slate-100 p-0.5 rounded-lg gap-0.5">
+          <button id="sizeAutoBtn" onclick="setSizeMode('auto')"
+            class="quality-pill selected px-2.5 py-1 text-xs font-medium text-slate-700">Auto</button>
+          <button id="sizeManualBtn" onclick="setSizeMode('manual')"
+            class="quality-pill px-2.5 py-1 text-xs font-medium text-slate-500">Manual</button>
+        </div>
+      </div>
+      <p id="sizeHint" class="text-xs text-slate-400 mb-3">TDG will automatically determine the optimal row and column count.</p>
+      <div id="sizeSliders" class="hidden grid grid-cols-2 gap-5">
+        <!-- Rows -->
+        <div>
+          <div class="flex justify-between items-center mb-1.5">
+            <span class="text-xs text-slate-600 font-medium">Rows per table</span>
+            <span class="text-xs font-bold tabular-nums px-1.5 py-0.5 rounded" style="background:#FDE8DF;color:#C4522A;" id="rowsLabel">10</span>
+          </div>
+          <input type="range" id="numRows" min="5" max="50" step="5" value="10"
+            oninput="document.getElementById('rowsLabel').textContent = this.value"
+            class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-slate-200"
+            style="accent-color:#C4522A;">
+          <div class="flex justify-between text-xs text-slate-300 mt-1 px-0.5">
+            <span>5</span><span>25</span><span>50</span>
+          </div>
+        </div>
+        <!-- Columns -->
+        <div>
+          <div class="flex justify-between items-center mb-1.5">
+            <span class="text-xs text-slate-600 font-medium">Columns per table</span>
+            <span class="text-xs font-bold tabular-nums px-1.5 py-0.5 rounded" style="background:#FDE8DF;color:#C4522A;" id="colsLabel">6</span>
+          </div>
+          <input type="range" id="numCols" min="3" max="8" step="1" value="6"
+            oninput="document.getElementById('colsLabel').textContent = this.value"
+            class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-slate-200"
+            style="accent-color:#C4522A;">
+          <div class="flex justify-between text-xs text-slate-300 mt-1 px-0.5">
+            <span>3</span><span>5</span><span>8</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Column Names -->
+    <div class="mb-5">
+      <div class="flex items-center gap-3 mb-2">
+        <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Custom Column Names</label>
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" id="customColsToggle" class="sr-only peer" onchange="toggleCustomCols()">
+          <div class="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-[#C4522A] after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+        </label>
+        <span class="text-xs text-slate-400" id="customColsStatus">Off — TDG picks column names</span>
+      </div>
+      <div id="customColsArea" class="hidden">
+        <p class="text-xs text-slate-500 mb-2">Enter column names separated by commas or new lines (max 15). Row values will be generated to match.</p>
+        <textarea id="customColsInput" rows="3"
+          placeholder="e.g. customer_id, full_name, email, signup_date, total_orders&#10;&#10;Separate with commas or one per line"
+          oninput="updateCustomColsPreview()"
+          class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#C4522A] placeholder-slate-300 resize-none font-mono leading-relaxed"></textarea>
+        <div class="flex items-start justify-between mt-2">
+          <div id="customColsPreview" class="flex flex-wrap gap-1 flex-1 mr-3"></div>
+          <span id="customColsCount" class="text-xs text-slate-400 flex-shrink-0 pt-0.5">0 columns</span>
+        </div>
+      </div>
+    </div>
+
+    </div><!-- end #aiOnlySections -->
+
+    <!-- Format multi-select -->
+    <div class="mb-6">
+      <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
+        Export Formats
+        <span class="text-slate-400 font-normal normal-case">(pick any combination)</span>
+      </label>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="toggleFmt('csv')" id="pill-csv"
+          class="fmt-pill active-csv border-2 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-[#121a38]"></span>CSV
+        </button>
+        <button onclick="toggleFmt('json')" id="pill-json"
+          class="fmt-pill active-json border-2 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-[#121a38]"></span>JSON
+        </button>
+        <button onclick="toggleFmt('parquet')" id="pill-parquet"
+          class="fmt-pill active-parquet border-2 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-[#121a38]"></span>Parquet
+        </button>
+        <button onclick="toggleFmt('txt')" id="pill-txt"
+          class="fmt-pill border-2 border-slate-200 bg-slate-50 text-slate-400 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-slate-400"></span>TXT
+        </button>
+        <button onclick="toggleFmt('xlsx')" id="pill-xlsx"
+          class="fmt-pill border-2 border-slate-200 bg-slate-50 text-slate-400 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-slate-400"></span>XLSX
+        </button>
+      </div>
+    </div>
+
+    <!-- Generate button -->
+    <button id="generateBtn" onclick="generate()"
+      class="w-full sm:w-auto px-8 py-3 text-white font-semibold rounded-xl shadow transition-all flex items-center justify-center gap-2 text-sm" style="background:#C4522A;" onmouseover="this.style.background='#A34222'" onmouseout="this.style.background='#C4522A'">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/>
+      </svg>
+      <span id="generateBtnLabel">Generate Data</span>
+    </button>
+
+    <!-- Error display -->
+    <div id="errorBox" class="hidden mt-4 rounded-xl p-4 text-sm" style="background:#FDDCE0;border:1px solid #f53b53;color:#A01A29;"></div>
+  </div>
+
+  <!-- ── Loading ──────────────────────────────────────────────────── -->
+  <div id="loadingPanel" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+    <div class="flex flex-col items-center gap-4">
+      <svg class="spinner w-12 h-12" style="color:#C4522A;" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      <div class="text-center">
+        <p class="font-semibold text-slate-800" id="loadingTitle">Generating synthetic data…</p>
+        <p class="text-sm text-slate-500 mt-1" id="loadingSubtitle">LLM → PostgreSQL → DuckDB</p>
+      </div>
+      <div class="w-full max-w-xs bg-slate-100 rounded-full h-1.5 overflow-hidden">
+        <div id="progressBar" class="h-full rounded-full transition-all duration-500" style="width:10%;background:#C4522A;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Results ──────────────────────────────────────────────────── -->
+  <div id="resultsPanel" class="hidden space-y-5">
+
+    <!-- Company banner (shown when context was provided) -->
+    <div id="companyBanner" class="hidden rounded-2xl px-5 py-3 flex items-center gap-3" style="background:#FDE8DF;border:1px solid #F0B89A;">
+      <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" style="background:#F5C4B3;">
+        <svg class="w-4 h-4" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21"/>
+        </svg>
+      </div>
+      <div>
+        <p class="text-xs font-semibold uppercase tracking-wider" style="color:#A34222;">Tailored For</p>
+        <p id="companyBannerName" class="text-sm font-bold" style="color:#7A2C0E;"></p>
+        <p id="companyBannerCtx" class="text-xs mt-0.5 line-clamp-1" style="color:#C4522A;"></p>
+      </div>
+    </div>
+
+    <!-- Results header: stats + download all button -->
+    <div class="flex flex-col sm:flex-row sm:items-start gap-3">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 flex-1" id="statBar"></div>
+      <div class="flex flex-col gap-2 self-start">
+        <button onclick="downloadAll()"
+          class="flex items-center gap-2 px-5 py-2.5 text-white text-sm font-semibold rounded-xl shadow transition-all whitespace-nowrap" style="background:#0a0a0a;" onmouseover="this.style.background='#333'" onmouseout="this.style.background='#0a0a0a'">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+          </svg>
+          Download All
+          <span id="downloadFmtLabel" class="text-xs font-normal text-slate-400"></span>
+        </button>
+        <button onclick="downloadPDF()" id="pdfBtn"
+          class="flex items-center gap-2 px-5 py-2.5 text-white text-sm font-semibold rounded-xl shadow transition-all whitespace-nowrap" style="background:#0a0a0a;" onmouseover="this.style.background='#333'" onmouseout="this.style.background='#0a0a0a'">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
+          </svg>
+          PDF Report
+        </button>
+      </div>
+    </div>
+
+    <!-- Cleaning diff card (messy mode only) -->
+    <div id="cleaningCard" class="hidden bg-amber-50 border border-amber-200 rounded-2xl p-5">
+      <div class="flex items-center gap-2 mb-3">
+        <svg class="w-5 h-5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.53 16.122a3 3 0 00-5.78 1.128 2.25 2.25 0 01-2.4 2.245 4.5 4.5 0 008.4-2.245c0-.399-.078-.78-.22-1.128zm0 0a15.998 15.998 0 003.388-1.62m-5.043-.025a15.994 15.994 0 011.622-3.395m3.42 3.42a15.995 15.995 0 004.764-4.648l3.876-5.814a1.151 1.151 0 00-1.597-1.597L14.146 6.32a15.996 15.996 0 00-4.649 4.763m3.42 3.42a6.776 6.776 0 00-3.42-3.42"/>
+        </svg>
+        <h3 class="font-semibold text-amber-900">Column Name Cleaning</h3>
+        <span id="renameCountBadge" class="ml-auto text-xs font-bold px-2 py-0.5 bg-amber-200 text-amber-800 rounded-full"></span>
+      </div>
+      <p class="text-xs text-amber-700 mb-3">TDG automatically normalizes messy column names to clean <code class="bg-amber-100 px-1 rounded font-mono">snake_case</code> identifiers.</p>
+      <div id="cleaningGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"></div>
+    </div>
+
+    <!-- AI Summary -->
+    <div id="summaryCard" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+      <div class="flex items-center gap-2 mb-3">
+        <svg class="w-5 h-5" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/>
+        </svg>
+        <h3 class="font-semibold text-slate-800">AI Analysis</h3>
+        <span class="text-xs text-slate-400 ml-1" id="summaryModel"></span>
+      </div>
+      <p id="summaryText" class="text-sm text-slate-700 leading-relaxed"></p>
+    </div>
+
+    <!-- Table explorer -->
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div class="px-5 pt-4 border-b border-slate-100">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-semibold text-slate-800">Data Tables</h3>
+          <span class="text-xs text-slate-400" id="tableCountLabel"></span>
+        </div>
+        <div class="flex gap-1 overflow-x-auto" id="tableTabs"></div>
+      </div>
+      <div id="tableContent" class="p-5"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────
+let currentData      = null;
+let messy            = false;
+let selectedFmts     = new Set(['csv', 'json', 'parquet']);
+let activeTable      = null;
+let ctxMode          = 'type';   // 'type' | 'upload'
+let ctxExpanded      = false;
+let sizeMode         = 'auto';   // 'auto' | 'manual'
+let customColsEnabled = false;
+let genMode          = 'ai';     // 'ai' | 'upload'
+let sdvFiles         = [];
+let sdvAvailable     = false;
+
+const FMT_LABELS = { csv: 'CSV', json: 'JSON', parquet: 'Parquet', txt: 'TXT', xlsx: 'XLSX' };
+const FMT_CLASSES = {
+  csv:     { badge: 'badge-csv',     dl: 'dl-btn-csv',     dot: 'bg-[#121a38]',  active: 'active-csv'     },
+  json:    { badge: 'badge-json',    dl: 'dl-btn-json',    dot: 'bg-[#121a38]',  active: 'active-json'    },
+  parquet: { badge: 'badge-parquet', dl: 'dl-btn-parquet', dot: 'bg-[#121a38]',  active: 'active-parquet' },
+  txt:     { badge: 'badge-txt',     dl: 'dl-btn-txt',     dot: 'bg-[#121a38]',  active: 'active-txt'     },
+  xlsx:    { badge: 'badge-xlsx',    dl: 'dl-btn-xlsx',    dot: 'bg-[#121a38]',  active: 'active-xlsx'    },
+};
+
+// ── Init ─────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const resp = await fetch('/api/config');
+    const cfg  = await resp.json();
+    const iSel = document.getElementById('industrySelect');
+    const mSel = document.getElementById('modelSelect');
+    for (const [k, v] of Object.entries(cfg.industries || {}))
+      iSel.add(new Option(v, k));
+    for (const [k, v] of Object.entries(cfg.models || {}))
+      mSel.add(new Option(v, k));
+  } catch (e) {
+    console.warn('Config load failed:', e);
+  }
+  try {
+    const sdvResp = await fetch('/api/sdv-status');
+    const sdvData = await sdvResp.json();
+    sdvAvailable = sdvData.available;
+    if (!sdvAvailable) {
+      const btn = document.getElementById('srcSDV');
+      if (btn) {
+        btn.disabled = true;
+        btn.title = 'SDV not installed — run: pip install sdv';
+        btn.classList.add('opacity-40', 'cursor-not-allowed');
+      }
+    }
+  } catch(e) {}
+}
+init();
+
+// ── Data Quality toggle ───────────────────────────────────────────────
+function setMessy(val) {
+  messy = val;
+  const pC   = document.getElementById('pillClean');
+  const pM   = document.getElementById('pillMessy');
+  const hint = document.getElementById('qualityHint');
+
+  if (messy) {
+    pM.classList.add('selected');
+    pM.classList.replace('text-slate-500', 'text-slate-700');
+    pC.classList.remove('selected');
+    pC.classList.replace('text-slate-700', 'text-slate-500');
+    hint.textContent = 'Column names will be messy (spaces, special chars, mixed case) — TDG normalizes them to snake_case.';
+  } else {
+    pC.classList.add('selected');
+    pC.classList.replace('text-slate-500', 'text-slate-700');
+    pM.classList.remove('selected');
+    pM.classList.replace('text-slate-700', 'text-slate-500');
+    hint.textContent = 'Column names are already clean snake_case — no normalization needed.';
+  }
+  if (currentData) renderCleaningCard(currentData);
+}
+
+// ── Format toggle ─────────────────────────────────────────────────────
+function toggleFmt(fmt) {
+  if (selectedFmts.has(fmt)) {
+    if (selectedFmts.size === 1) return; // keep at least one
+    selectedFmts.delete(fmt);
+    const pill = document.getElementById('pill-' + fmt);
+    pill.className = 'fmt-pill border-2 border-slate-200 bg-slate-50 text-slate-400 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5';
+    pill.querySelector('span').className = 'w-2 h-2 rounded-full bg-slate-400';
+  } else {
+    selectedFmts.add(fmt);
+    const pill = document.getElementById('pill-' + fmt);
+    const cls  = FMT_CLASSES[fmt];
+    pill.className = `fmt-pill ${cls.active} border-2 rounded-lg px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5`;
+    pill.querySelector('span').className = `w-2 h-2 rounded-full ${cls.dot}`;
+  }
+  if (currentData) renderTableTabs(currentData);
+  updateDownloadLabel();
+}
+
+// ── Generation mode ───────────────────────────────────────────────────
+function setGenMode(mode) {
+  genMode = mode;
+  const aiBtn  = document.getElementById('srcAI');
+  const sdvBtn = document.getElementById('srcSDV');
+  const sdvSec = document.getElementById('sdvUploadSection');
+  const aiSec  = document.getElementById('aiOnlySections');
+  const label  = document.getElementById('generateBtnLabel');
+
+  if (mode === 'ai') {
+    aiBtn.classList.add('selected');
+    if (aiBtn.classList.contains('text-slate-500')) aiBtn.classList.replace('text-slate-500', 'text-slate-700');
+    sdvBtn.classList.remove('selected');
+    if (sdvBtn.classList.contains('text-slate-700')) sdvBtn.classList.replace('text-slate-700', 'text-slate-500');
+    sdvSec.classList.add('hidden');
+    aiSec.classList.remove('hidden');
+    if (label) label.textContent = 'Generate Data';
+  } else {
+    sdvBtn.classList.add('selected');
+    if (sdvBtn.classList.contains('text-slate-500')) sdvBtn.classList.replace('text-slate-500', 'text-slate-700');
+    aiBtn.classList.remove('selected');
+    if (aiBtn.classList.contains('text-slate-700')) aiBtn.classList.replace('text-slate-700', 'text-slate-500');
+    sdvSec.classList.remove('hidden');
+    aiSec.classList.add('hidden');
+    if (label) label.textContent = 'Upload & Scale with SDV';
+  }
+}
+
+// ── SDV file handling ─────────────────────────────────────────────────
+function sdvDragOver(e) {
+  e.preventDefault();
+  const dz = document.getElementById('sdvDropZone');
+  dz.style.borderColor = '#C4522A';
+  dz.style.background  = 'rgba(196,82,42,0.04)';
+}
+function sdvDragLeave(e) {
+  const dz = document.getElementById('sdvDropZone');
+  dz.style.borderColor = '';
+  dz.style.background  = '';
+}
+function sdvDrop(e) {
+  e.preventDefault();
+  sdvDragLeave(e);
+  const dropped = Array.from(e.dataTransfer.files);
+  dropped.forEach(f => addSdvFile(f));
+}
+function sdvFilesSelected(e) {
+  Array.from(e.target.files).forEach(f => addSdvFile(f));
+  e.target.value = '';
+}
+function addSdvFile(file) {
+  if (sdvFiles.some(f => f.name === file.name && f.size === file.size)) return;
+  sdvFiles.push(file);
+  renderSdvFileList();
+}
+function removeSdvFile(idx) {
+  sdvFiles.splice(idx, 1);
+  renderSdvFileList();
+}
+function renderSdvFileList() {
+  const list = document.getElementById('sdvFileList');
+  if (sdvFiles.length === 0) { list.classList.add('hidden'); return; }
+  list.classList.remove('hidden');
+  list.innerHTML = sdvFiles.map((f, i) => `
+    <div class="flex items-center justify-between px-3 py-2 rounded-xl text-xs" style="background:#FDE8DF;border:1px solid #F5C4B3;">
+      <div class="flex items-center gap-2 min-w-0">
+        <svg class="w-3.5 h-3.5 flex-shrink-0" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+        <span class="font-medium truncate" style="color:#8B3515;">${esc(f.name)}</span>
+        <span class="text-slate-400 flex-shrink-0">${(f.size / 1024).toFixed(1)} KB</span>
+      </div>
+      <button onclick="removeSdvFile(${i})" class="ml-3 text-slate-400 hover:text-red-500 flex-shrink-0">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>`).join('');
+}
+
+// ── Generate ──────────────────────────────────────────────────────────
+function toggleAiScale() {
+  const on = document.getElementById('aiScaleToggle').checked;
+  document.getElementById('aiScaleOptions').classList.toggle('hidden', !on);
+  document.getElementById('aiScaleStatus').textContent =
+    on ? 'On — AI seeds the data, SDV scales it up' : 'Off — AI generates the rows directly';
+}
+
+async function generate() {
+  if (genMode === 'upload') { return generateSdv(); }
+  if (document.getElementById('aiScaleToggle') &&
+      document.getElementById('aiScaleToggle').checked) { return generateAiScale(); }
+
+  const industry = document.getElementById('industrySelect').value;
+  const model    = document.getElementById('modelSelect').value;
+  hideError();
+  showLoading(true);
+  setStep(2);
+
+  const bar    = document.getElementById('progressBar');
+  const steps  = [
+    [25, 'Generating synthetic data…',  'LLM crafting relational tables'],
+    [55, 'Writing to PostgreSQL…',      'Creating tables and inserting rows'],
+    [80, 'Snapshotting to DuckDB…',     'Normalizing column names'],
+    [93, 'Generating AI summary…',      'Analyzing schema and patterns'],
+  ];
+  let si = 0;
+  const ticker = setInterval(() => {
+    if (si < steps.length) {
+      const [pct, title, sub] = steps[si++];
+      bar.style.width = pct + '%';
+      document.getElementById('loadingTitle').textContent    = title;
+      document.getElementById('loadingSubtitle').textContent = sub;
+    }
+  }, 900);
+
+  try {
+    const numRows = sizeMode === 'manual' ? parseInt(document.getElementById('numRows').value) : null;
+    const numCols = sizeMode === 'manual' ? parseInt(document.getElementById('numCols').value) : null;
+    let customCols = null;
+    if (customColsEnabled) {
+      const parsed = parseCustomCols(document.getElementById('customColsInput').value);
+      if (parsed.length > 0) customCols = parsed.slice(0, 15);
+    }
+    const resp = await fetch('/api/generate', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        industry, model, messy,
+        company_name:    (document.getElementById('companyName').value || '').trim(),
+        company_context: (document.getElementById('companyContext').value || '').trim(),
+        num_rows:        numRows,
+        num_cols:        numCols,
+        custom_columns:  customCols,
+      }),
+    });
+    clearInterval(ticker);
+    bar.style.width = '100%';
+    const data = await safeJson(resp);
+    if (!resp.ok) {
+      showError(data.detail || 'Generation failed.');
+      showLoading(false);
+      setStep(1);
+      return;
+    }
+    currentData = data;
+    showLoading(false);
+    renderResults(data);
+    setStep(3);
+  } catch (e) {
+    clearInterval(ticker);
+    showError(e.message);
+    showLoading(false);
+    setStep(1);
+  }
+}
+
+async function generateAiScale() {
+  const industry   = document.getElementById('industrySelect').value;
+  const model      = document.getElementById('modelSelect').value;
+  const scaleRows  = parseInt(document.getElementById('aiScaleRows').value)   || 1000;
+  const epochs     = parseInt(document.getElementById('aiScaleEpochs').value) || 50;
+  hideError();
+  showLoading(true);
+  setStep(2);
+
+  const bar     = document.getElementById('progressBar');
+  const steps = [
+    [25, 'AI generating seed data…',  'Crafting a realistic sample'],
+    [55, 'Scaling up data…',          `Generating ${scaleRows.toLocaleString()} rows`],
+    [85, 'Writing to DuckDB…',        'Finalising database'],
+  ];
+  let si = 0;
+  const ticker = setInterval(() => {
+    if (si < steps.length) {
+      const [pct, title, sub] = steps[si++];
+      bar.style.width = pct + '%';
+      document.getElementById('loadingTitle').textContent    = title;
+      document.getElementById('loadingSubtitle').textContent = sub;
+    }
+  }, 1100);
+
+  try {
+    const numRows = sizeMode === 'manual' ? parseInt(document.getElementById('numRows').value) : null;
+    const numCols = sizeMode === 'manual' ? parseInt(document.getElementById('numCols').value) : null;
+    let customCols = null;
+    if (customColsEnabled) {
+      const parsed = parseCustomCols(document.getElementById('customColsInput').value);
+      if (parsed.length > 0) customCols = parsed.slice(0, 15);
+    }
+    const resp = await fetch('/api/generate-and-scale', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        industry, model, messy,
+        company_name:    (document.getElementById('companyName').value || '').trim(),
+        company_context: (document.getElementById('companyContext').value || '').trim(),
+        num_rows:        numRows,
+        num_cols:        numCols,
+        custom_columns:  customCols,
+        scale_rows:      scaleRows,
+        epochs:          epochs,
+      }),
+    });
+    clearInterval(ticker);
+    bar.style.width = '100%';
+    const data = await safeJson(resp);
+    if (!resp.ok) {
+      showError(data.detail || 'Generate-and-scale failed.');
+      showLoading(false);
+      setStep(1);
+      return;
+    }
+    currentData = data;
+    showLoading(false);
+    renderResults(data);
+    setStep(3);
+  } catch (e) {
+    clearInterval(ticker);
+    showError(e.message);
+    showLoading(false);
+    setStep(1);
+  }
+}
+
+async function generateSdv() {
+  if (sdvFiles.length === 0) {
+    showError('Please upload at least one CSV or Excel file before scaling.');
+    return;
+  }
+  const industry   = document.getElementById('industrySelect').value;
+  const model      = document.getElementById('modelSelect').value;
+  const targetRows = parseInt(document.getElementById('sdvTargetRows').value) || 1000;
+  const epochs     = parseInt(document.getElementById('sdvEpochs').value) || 100;
+  hideError();
+  showLoading(true);
+  setStep(2);
+
+  const bar   = document.getElementById('progressBar');
+  const steps = [
+    [20, 'Reading uploaded files…',    'Parsing your data'],
+    [55, 'Scaling up data…',           `Generating ${targetRows.toLocaleString()} rows`],
+    [85, 'Writing to DuckDB…',         'Finalising database'],
+  ];
+  let si = 0;
+  const ticker = setInterval(() => {
+    if (si < steps.length) {
+      const [pct, title, sub] = steps[si++];
+      bar.style.width = pct + '%';
+      document.getElementById('loadingTitle').textContent    = title;
+      document.getElementById('loadingSubtitle').textContent = sub;
+    }
+  }, 1000);
+
+  try {
+    const fd = new FormData();
+    sdvFiles.forEach(f => fd.append('files', f));
+    fd.append('scale_rows',      targetRows);
+    fd.append('epochs',          epochs);
+    fd.append('industry',        industry);
+    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
+    fd.append('company_context', (document.getElementById('companyContext').value || '').trim());
+    fd.append('model',           model);
+
+    const resp = await fetch('/api/upload-and-scale', { method: 'POST', body: fd });
+    clearInterval(ticker);
+    bar.style.width = '100%';
+    const data = await safeJson(resp);
+    if (!resp.ok) {
+      showError(data.detail || 'SDV scaling failed.');
+      showLoading(false);
+      setStep(1);
+      return;
+    }
+    currentData = data;
+    showLoading(false);
+    renderResults(data);
+    setStep(3);
+  } catch (e) {
+    clearInterval(ticker);
+    showError(e.message);
+    showLoading(false);
+    setStep(1);
+  }
+}
+
+async function safeJson(resp) {
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return resp.json();
+  const text = await resp.text();
+  return { detail: text || `HTTP ${resp.status}` };
+}
+
+// ── Render ────────────────────────────────────────────────────────────
+function renderResults(data) {
+  renderCompanyBanner(data);
+  renderStats(data);
+  renderCleaningCard(data);
+  renderSummary(data);
+  renderTableTabs(data);
+  updateDownloadLabel();
+  const panel = document.getElementById('resultsPanel');
+  panel.classList.remove('hidden');
+  panel.classList.add('fade-in');
+}
+
+function renderCompanyBanner(data) {
+  const banner = document.getElementById('companyBanner');
+  const name   = data.company_name || '';
+  const ctx    = (document.getElementById('companyContext').value || '').trim();
+  if (name) {
+    document.getElementById('companyBannerName').textContent = name;
+    document.getElementById('companyBannerCtx').textContent  = ctx ? ctx.slice(0, 120) + (ctx.length > 120 ? '…' : '') : '';
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+function renderStats(data) {
+  const tables    = Object.keys(data.tables || {});
+  const renamed   = Object.values(data.column_renames || {}).flat().filter(c => c.changed).length;
+  const sample    = tables.length ? data.tables[tables[0]] : null;
+  const rowsPerTbl = (data.num_rows != null)
+    ? data.num_rows
+    : (sample ? (sample.rows || []).length : 0);
+  const colsPerTbl = sample ? (sample.columns || []).length : 0;
+
+  const stats = [
+    { label: 'Tables',        value: tables.length,          color: 'blue'    },
+    { label: 'Rows / Table',  value: rowsPerTbl,             color: 'emerald' },
+    { label: 'Cols / Table',  value: colsPerTbl,             color: 'violet'  },
+    { label: 'Cols Renamed',  value: renamed,                color: renamed > 0 ? 'amber' : 'slate' },
+  ];
+  const colorMap = {
+    blue:    'stat-blue',
+    emerald: 'stat-cyan',
+    violet:  'stat-navy',
+    amber:   'stat-warm',
+    slate:   'bg-slate-50 border border-slate-100 text-slate-500',
+  };
+  document.getElementById('statBar').innerHTML = stats.map(s => `
+    <div class="rounded-2xl px-4 py-3 ${colorMap[s.color]}">
+      <div class="text-2xl font-bold">${s.value}</div>
+      <div class="text-xs font-medium mt-0.5 opacity-80">${s.label}</div>
+    </div>`).join('');
+}
+
+function renderCleaningCard(data) {
+  const card  = document.getElementById('cleaningCard');
+  const grid  = document.getElementById('cleaningGrid');
+  const badge = document.getElementById('renameCountBadge');
+
+  const renamed = Object.values(data.column_renames || {}).flat().filter(c => c.changed);
+  if (!data.messy || renamed.length === 0) { card.classList.add('hidden'); return; }
+
+  badge.textContent = renamed.length + ' renamed';
+  grid.innerHTML = renamed.map(c => `
+    <div class="bg-white border border-amber-100 rounded-xl p-2.5 text-xs">
+      <div class="font-mono text-amber-700 line-through opacity-60 truncate mb-1">${esc(c.original)}</div>
+      <div class="flex items-center gap-1">
+        <svg class="w-3 h-3 flex-shrink-0" style="color:#1db8f2;" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12h15m0 0l-6.75-6.75M19.5 12l-6.75 6.75"/></svg>
+        <span class="font-mono font-semibold truncate" style="color:#0A5A70;">${esc(c.cleaned)}</span>
+      </div>
+    </div>`).join('');
+  card.classList.remove('hidden');
+}
+
+function renderSummary(data) {
+  const summary = data.summary || '';
+  document.getElementById('summaryText').textContent  = summary;
+  document.getElementById('summaryModel').textContent = summary ? (data.model || '') : '';
+  document.getElementById('summaryCard').classList.toggle('hidden', !summary);
+}
+
+// Assign selected formats to tables in rotation (for source badges)
+function distributeSources(tableNames) {
+  const fmtArr = [...selectedFmts].map(f => f.toUpperCase());
+  const out = {};
+  tableNames.forEach((t, i) => { out[t] = fmtArr[i % fmtArr.length]; });
+  return out;
+}
+
+function renderTableTabs(data) {
+  const tables  = Object.keys(data.tables || {});
+  const sources = distributeSources(tables);
+  document.getElementById('tableCountLabel').textContent = tables.length + ' tables';
+
+  if (!activeTable || !tables.includes(activeTable)) activeTable = tables[0];
+
+  document.getElementById('tableTabs').innerHTML = tables.map(t => {
+    const src    = sources[t] || 'CSV';
+    const fmtKey = src.toLowerCase();
+    const cls    = FMT_CLASSES[fmtKey] || FMT_CLASSES.csv;
+    const isAct  = t === activeTable;
+    return `
+      <button onclick="switchTable('${esc(t)}')"
+        class="tab-btn flex items-center gap-1.5 px-4 py-2.5 rounded-t-xl text-sm font-medium whitespace-nowrap border-b-2 transition-all
+          ${isAct ? 'active border-[#C4522A] bg-white' : 'border-transparent text-slate-500 hover:text-slate-700'}">
+        <span class="text-xs px-1.5 py-0.5 rounded font-semibold ${cls.badge}">${esc(src)}</span>
+        ${esc(t)}
+      </button>`;
+  }).join('');
+
+  renderTableContent(data, sources);
+}
+
+function switchTable(t) {
+  activeTable = t;
+  if (currentData) renderTableTabs(currentData);
+}
+
+let xlsxViewActive = false;
+
+function renderTableContent(data, sources) {
+  const t   = activeTable;
+  const tbl = data.tables[t];
+  if (!tbl) return;
+
+  const allFmts = [...selectedFmts];
+  const hasXlsx = allFmts.includes('xlsx');
+  const otherFmts = allFmts.filter(f => f !== 'xlsx');
+
+  const dlBtns = allFmts.map(f => {
+    const cls = FMT_CLASSES[f] || {};
+    const url = `/api/export/${encodeURIComponent(data.industry)}/${encodeURIComponent(t)}?fmt=${f}`;
+    return `<a href="${url}" class="inline-flex items-center gap-1.5 border rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${cls.dl || ''}">
+      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+      </svg>${FMT_LABELS[f]}</a>`;
+  }).join('');
+
+  // Always show XLSX download even if pill is off
+  const xlsxAlwaysBtn = !hasXlsx ? `<a href="/api/export/${encodeURIComponent(data.industry)}/${encodeURIComponent(t)}?fmt=xlsx"
+    class="inline-flex items-center gap-1.5 border rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors dl-btn-xlsx">
+    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+    </svg>XLSX</a>` : '';
+
+  const cols   = tbl.columns || [];
+  const rows   = tbl.rows    || [];
+
+  // Standard table view
+  const stdHeader = cols.map(c => `<th class="px-3 py-2 text-left text-xs font-semibold text-slate-500 whitespace-nowrap">${esc(c)}</th>`).join('');
+  const stdBody   = rows.slice(0, 8).map(row =>
+    `<tr class="border-t border-slate-50 hover:bg-slate-50 transition-colors">${
+      row.map(v => `<td class="px-3 py-2 text-xs text-slate-700 whitespace-nowrap max-w-[160px] truncate">${
+        v == null ? '<span class="text-slate-300 italic">null</span>' : esc(String(v))
+      }</td>`).join('')
+    }</tr>`
+  ).join('');
+
+  // Excel-style spreadsheet view
+  const colLetters = cols.map((_, i) => String.fromCharCode(65 + (i % 26)));
+  const xlHeader = `<th style="background:#1d6f42;color:white;border:1px solid #155a35;padding:4px 8px;font-size:11px;font-weight:700;min-width:36px;text-align:center">#</th>` +
+    cols.map((c, i) => `<th style="background:#1d6f42;color:white;border:1px solid #155a35;padding:4px 10px;font-size:11px;font-weight:700;white-space:nowrap;text-align:left">${colLetters[i]} &nbsp; ${esc(c)}</th>`).join('');
+  const xlBody = rows.slice(0, 10).map((row, ri) =>
+    `<tr style="background:${ri % 2 === 0 ? '#ffffff' : '#f0f7f0'}">${
+      `<td style="background:#e8f0e8;border:1px solid #c6ddc6;padding:3px 6px;font-size:11px;font-weight:600;color:#1d6f42;text-align:center">${ri + 1}</td>` +
+      row.map(v => `<td style="border:1px solid #d4e8d4;padding:3px 10px;font-size:11px;color:#1a1a1a;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis">${
+        v == null ? '' : esc(String(v))
+      }</td>`).join('')
+    }</tr>`
+  ).join('');
+
+  const tableViewId = `tv_${t.replace(/\W/g,'_')}`;
+
+  document.getElementById('tableContent').innerHTML = `
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-slate-800">${esc(t)}</span>
+        <span class="text-xs text-slate-400">${rows.length} rows &times; ${cols.length} cols</span>
+      </div>
+      <div class="flex flex-wrap gap-2 items-center">
+        <button onclick="toggleXlsxView('${tableViewId}')" id="xlsxViewBtn_${tableViewId}"
+          class="inline-flex items-center gap-1.5 border-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors" style="border-color:#f53b53;color:#A01A29;" onmouseover="this.style.background='#FDDCE0'" onmouseout="this.style.background=''">
+          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h1.5C5.496 19.5 6 18.996 6 18.375m-3.75.125V7.125A2.25 2.25 0 014.5 4.875h15A2.25 2.25 0 0121.75 7.125v9.75m-18 0V7.125M21.75 16.875V7.125M6 7.5h12M6 12h12m-12 4.5h6"/>
+          </svg>
+          Spreadsheet View
+        </button>
+        <div class="flex flex-wrap gap-2">${dlBtns}${xlsxAlwaysBtn}</div>
+      </div>
+    </div>
+    <div id="${tableViewId}">
+      <div id="${tableViewId}_std" class="overflow-x-auto rounded-xl border border-slate-100">
+        <table class="min-w-full">
+          <thead class="bg-slate-50"><tr>${stdHeader}</tr></thead>
+          <tbody>${stdBody}</tbody>
+        </table>
+        ${rows.length > 8 ? `<div class="text-center py-2 text-xs text-slate-400 border-t border-slate-100">Showing 8 of ${rows.length} rows -- download to see all</div>` : ''}
+      </div>
+      <div id="${tableViewId}_xl" class="hidden overflow-x-auto rounded-xl" style="border:2px solid #1d6f42">
+        <div style="background:#1d6f42;padding:6px 12px;display:flex;align-items:center;gap:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="white"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8" fill="none" stroke="white" stroke-width="1.5"/></svg>
+          <span style="color:white;font-size:12px;font-weight:700">${esc(t)}.xlsx</span>
+          <span style="color:#90ee90;font-size:11px">${rows.length} rows x ${cols.length} columns</span>
+        </div>
+        <table style="min-width:100%;border-collapse:collapse;font-family:Calibri,Arial,sans-serif">
+          <thead><tr>${xlHeader}</tr></thead>
+          <tbody>${xlBody}</tbody>
+        </table>
+        ${rows.length > 10 ? `<div style="background:#e8f0e8;border-top:1px solid #c6ddc6;padding:4px 12px;font-size:11px;color:#1d6f42">Showing 10 of ${rows.length} rows -- download XLSX to open full file in Excel</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function toggleXlsxView(viewId) {
+  const std = document.getElementById(viewId + '_std');
+  const xl  = document.getElementById(viewId + '_xl');
+  const btn = document.getElementById('xlsxViewBtn_' + viewId);
+  if (!std || !xl) return;
+  const isXl = !xl.classList.contains('hidden');
+  xl.classList.toggle('hidden', isXl);
+  std.classList.toggle('hidden', !isXl);
+  btn.style.background = isXl ? '' : '#1d6f42';
+  btn.style.color      = isXl ? '' : 'white';
+  btn.style.borderColor= isXl ? '' : '#155a35';
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function showLoading(on) {
+  document.getElementById('loadingPanel').classList.toggle('hidden', !on);
+  document.getElementById('generateBtn').disabled = on;
+  if (on) {
+    document.getElementById('progressBar').style.width = '10%';
+    document.getElementById('resultsPanel').classList.add('hidden');
+  }
+}
+
+// ── Company Context card ──────────────────────────────────────────────
+function toggleContextCard() {
+  ctxExpanded = !ctxExpanded;
+  const body    = document.getElementById('contextBody');
+  const preview = document.getElementById('contextPreview');
+  const label   = document.getElementById('contextToggleLabel');
+  const chevron = document.getElementById('contextChevron');
+  body.classList.toggle('hidden', !ctxExpanded);
+  label.textContent = ctxExpanded ? 'Collapse' : 'Expand';
+  chevron.style.transform = ctxExpanded ? 'rotate(180deg)' : '';
+  // Show preview when collapsed and context is set
+  const name = (document.getElementById('companyName').value || '').trim();
+  if (!ctxExpanded && name) {
+    document.getElementById('contextPreviewText').textContent = name;
+    preview.classList.remove('hidden');
+  } else {
+    preview.classList.add('hidden');
+  }
+}
+
+function setCtxMode(mode) {
+  ctxMode = mode;
+  const typeBtn   = document.getElementById('modeType');
+  const uploadBtn = document.getElementById('modeUpload');
+  const typeArea  = document.getElementById('ctxTypeArea');
+  const upArea    = document.getElementById('ctxUploadArea');
+  if (mode === 'type') {
+    typeBtn.classList.add('selected');   typeBtn.classList.replace('text-slate-500','text-slate-700');
+    uploadBtn.classList.remove('selected'); uploadBtn.classList.replace('text-slate-700','text-slate-500');
+    typeArea.classList.remove('hidden'); upArea.classList.add('hidden');
+  } else {
+    uploadBtn.classList.add('selected'); uploadBtn.classList.replace('text-slate-500','text-slate-700');
+    typeBtn.classList.remove('selected'); typeBtn.classList.replace('text-slate-700','text-slate-500');
+    upArea.classList.remove('hidden');   typeArea.classList.add('hidden');
+  }
+}
+
+function onCompanyNameChange() {
+  // auto-expand if user starts typing
+  if (!ctxExpanded) toggleContextCard();
+}
+
+function onContextChange() {
+  const ta = document.getElementById('companyContext');
+  const v  = ta.value.slice(0, 2000);
+  if (ta.value.length > 2000) ta.value = v;
+  document.getElementById('ctxCharCount').textContent = `${ta.value.length} / 2000`;
+}
+
+function clearContext() {
+  document.getElementById('companyName').value    = '';
+  document.getElementById('companyContext').value = '';
+  document.getElementById('ctxCharCount').textContent = '0 / 2000';
+  clearCtxFile();
+  document.getElementById('contextPreview').classList.add('hidden');
+}
+
+function ctxDragOver(e) {
+  e.preventDefault();
+  const dz = document.getElementById('ctxDropZone'); dz.style.borderColor='#C4522A'; dz.style.background='rgba(196,82,42,0.04)';
+}
+function ctxDragLeave(e) {
+  const dz = document.getElementById('ctxDropZone'); dz.style.borderColor=''; dz.style.background='';
+}
+function ctxDrop(e) {
+  e.preventDefault();
+  ctxDragLeave(e);
+  const file = e.dataTransfer.files[0];
+  if (file) uploadCtxFile(file);
+}
+function ctxFileSelected(e) {
+  const file = e.target.files[0];
+  if (file) uploadCtxFile(file);
+  e.target.value = '';
+}
+
+async function uploadCtxFile(file) {
+  document.getElementById('ctxFileStatus').classList.add('hidden');
+  document.getElementById('ctxFileError').classList.add('hidden');
+  document.getElementById('ctxFileLoading').classList.remove('hidden');
+
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const resp = await fetch('/api/parse-context', { method: 'POST', body: fd });
+    const result = await safeJson(resp);
+    document.getElementById('ctxFileLoading').classList.add('hidden');
+    if (!resp.ok) {
+      document.getElementById('ctxFileError').textContent = result.detail || 'Failed to parse file.';
+      document.getElementById('ctxFileError').classList.remove('hidden');
+      return;
+    }
+    // Show status
+    document.getElementById('ctxFileName').textContent    = result.filename;
+    document.getElementById('ctxFilePreview').textContent = result.text.slice(0, 300) + (result.text.length > 300 ? '…' : '');
+    document.getElementById('ctxFileChars').textContent   = `${result.chars.toLocaleString()} characters extracted`;
+    document.getElementById('ctxFileStatus').classList.remove('hidden');
+    // Put extracted text into the hidden textarea so it's sent with generate
+    document.getElementById('companyContext').value = result.text;
+    onContextChange();
+  } catch(e) {
+    document.getElementById('ctxFileLoading').classList.add('hidden');
+    document.getElementById('ctxFileError').textContent = e.message;
+    document.getElementById('ctxFileError').classList.remove('hidden');
+  }
+}
+
+function clearCtxFile() {
+  document.getElementById('ctxFileStatus').classList.add('hidden');
+  document.getElementById('ctxFileError').classList.add('hidden');
+  document.getElementById('companyContext').value = '';
+  document.getElementById('ctxCharCount').textContent = '0 / 2000';
+}
+
+function downloadAll() {
+  if (!currentData) return;
+  const fmts = [...selectedFmts].join(',');
+  window.location.href = `/api/download/${encodeURIComponent(currentData.industry)}?formats=${fmts}`;
+}
+
+function downloadPDF() {
+  if (!currentData) return;
+  const btn = document.getElementById('pdfBtn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="w-4 h-4 spinner" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Building PDF…';
+  // Use a hidden anchor so we can detect completion via iframe trick
+  const url = `/api/report/${encodeURIComponent(currentData.industry)}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentData.industry}_report.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => { btn.disabled = false; btn.innerHTML = orig; }, 3000);
+}
+
+function updateDownloadLabel() {
+  const label = document.getElementById('downloadFmtLabel');
+  if (label) label.textContent = '(' + [...selectedFmts].map(f => f.toUpperCase()).join('+') + ')';
+}
+
+function showError(msg) {
+  const b = document.getElementById('errorBox');
+  b.textContent = msg;
+  b.classList.remove('hidden');
+}
+function hideError() { document.getElementById('errorBox').classList.add('hidden'); }
+
+// ── Size Mode toggle ──────────────────────────────────────────────────
+function setSizeMode(mode) {
+  sizeMode = mode;
+  const aBtn    = document.getElementById('sizeAutoBtn');
+  const mBtn    = document.getElementById('sizeManualBtn');
+  const sliders = document.getElementById('sizeSliders');
+  const hint    = document.getElementById('sizeHint');
+  if (mode === 'auto') {
+    aBtn.classList.add('selected');
+    if (aBtn.classList.contains('text-slate-500')) aBtn.classList.replace('text-slate-500', 'text-slate-700');
+    mBtn.classList.remove('selected');
+    if (mBtn.classList.contains('text-slate-700')) mBtn.classList.replace('text-slate-700', 'text-slate-500');
+    sliders.classList.add('hidden');
+    hint.textContent = 'TDG will automatically determine the optimal row and column count.';
+  } else {
+    mBtn.classList.add('selected');
+    if (mBtn.classList.contains('text-slate-500')) mBtn.classList.replace('text-slate-500', 'text-slate-700');
+    aBtn.classList.remove('selected');
+    if (aBtn.classList.contains('text-slate-700')) aBtn.classList.replace('text-slate-700', 'text-slate-500');
+    sliders.classList.remove('hidden');
+    hint.textContent = 'Set row and column counts manually using the sliders below.';
+  }
+}
+
+// ── Custom Columns ────────────────────────────────────────────────────
+function toggleCustomCols() {
+  customColsEnabled = document.getElementById('customColsToggle').checked;
+  document.getElementById('customColsArea').classList.toggle('hidden', !customColsEnabled);
+  document.getElementById('customColsStatus').textContent = customColsEnabled
+    ? 'On — enter column names below' : 'Off — TDG picks column names';
+  if (customColsEnabled) updateCustomColsPreview();
+}
+
+function parseCustomCols(input) {
+  return input.split(/[,\n]/).map(c => c.trim()).filter(c => c.length > 0);
+}
+
+function updateCustomColsPreview() {
+  const cols    = parseCustomCols(document.getElementById('customColsInput').value);
+  const preview = document.getElementById('customColsPreview');
+  const count   = document.getElementById('customColsCount');
+  const over    = cols.length > 15;
+  count.textContent = `${cols.length} column${cols.length !== 1 ? 's' : ''}${over ? ' (max 15)' : ''}`;
+  count.style.color = over ? '#f53b53' : '';
+  preview.innerHTML = cols.slice(0, 15).map(c =>
+    `<span class="text-xs px-2 py-0.5 rounded-full font-mono" style="background:#D8DCE8;color:#121a38;border:1px solid #121a38;">${esc(c)}</span>`
+  ).join('') + (over ? `<span class="text-xs text-slate-400 self-center ml-1">+${cols.length - 15} ignored</span>` : '');
+}
+
+function setStep(n) {
+  for (let i = 1; i <= 3; i++) {
+    const inner = document.getElementById('step' + i).querySelector('div');
+    const dot   = inner.querySelector('span');
+    if (i < n) {
+      inner.style.cssText = '';
+      dot.style.cssText = '';
+      inner.style.cssText = 'background:#D0F3FD;color:#0A5A70;';
+      inner.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full font-medium';
+      dot.style.cssText = 'background:#1db8f2;';
+      dot.className   = 'w-5 h-5 rounded-full text-white text-xs flex items-center justify-center font-bold';
+    } else if (i === n) {
+      inner.style.cssText = 'background:#FDE8DF;color:#C4522A;';
+      inner.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full font-medium';
+      dot.style.cssText = 'background:#C4522A;';
+      dot.className   = 'w-5 h-5 rounded-full text-white text-xs flex items-center justify-center font-bold';
+    } else {
+      inner.style.cssText = '';
+      dot.style.cssText = '';
+      inner.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-400 font-medium';
+      dot.className   = 'w-5 h-5 rounded-full bg-slate-300 text-white text-xs flex items-center justify-center font-bold';
+    }
+  }
+}
+</script>
+</body>
+</html>
