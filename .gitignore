@@ -18,6 +18,9 @@ files/duckdb/
 test_download.zip
 test_report.pdf
 
+# azd local environment (contains your env-specific values)
+.azure/
+
 # OS / editor
 .DS_Store
 Thumbs.db
