@@ -38,33 +38,18 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-// ── User-assigned identity (so the container app can pull from ACR) ───────────
-resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: 'id-${resourceToken}'
-  location: location
-  tags: tags
-}
-
 // ── Azure Container Registry ──────────────────────────────────────────────────
+// Admin user enabled so the container app authenticates with username/password.
+// This deliberately avoids a managed identity + AcrPull role assignment, which needs
+// Microsoft.Authorization/roleAssignments/write — a permission restricted corporate
+// subscriptions often withhold.
 resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
   name: 'acr${resourceToken}'
   location: location
   tags: tags
   sku: { name: 'Basic' }
   properties: {
-    adminUserEnabled: false
-  }
-}
-
-// Grant the identity AcrPull on the registry (built-in role id).
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: registry
-  name: guid(registry.id, identity.id, 'AcrPull')
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
+    adminUserEnabled: true
   }
 }
 
@@ -93,12 +78,6 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'ca-web-${resourceToken}'
   location: location
   tags: union(tags, { 'azd-service-name': 'web' })
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${identity.id}': {}
-    }
-  }
   properties: {
     managedEnvironmentId: caeEnv.id
     configuration: {
@@ -111,15 +90,21 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: registry.properties.loginServer
-          identity: identity.id
+          username: registry.listCredentials().username
+          passwordSecretRef: 'acr-password'
         }
       ]
-      secrets: hasKey ? [
+      secrets: concat([
+        {
+          name: 'acr-password'
+          value: registry.listCredentials().passwords[0].value
+        }
+      ], hasKey ? [
         {
           name: 'anthropic-api-key'
           value: anthropicApiKey
         }
-      ] : []
+      ] : [])
     }
     template: {
       containers: [
