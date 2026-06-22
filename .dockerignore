@@ -1,0 +1,22 @@
+# Version control / CI / azd local state
+.git
+.github
+.azure
+
+# Python caches and envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Runtime / generated artifacts (regenerated inside the container)
+*.log
+*.duckdb
+files/duckdb/
+test_download.zip
+test_report.pdf
+
+# Infra and docs not needed at runtime
+infra/
+*.md

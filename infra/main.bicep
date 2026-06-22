@@ -34,4 +34,7 @@ module resources 'resources.bicep' = {
 }
 
 output AZURE_LOCATION string = location
+output AZURE_RESOURCE_GROUP string = rg.name
+// azd reads this to know which registry to push the built image to.
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = resources.outputs.AZURE_CONTAINER_REGISTRY_ENDPOINT
 output WEB_URI string = resources.outputs.WEB_URI

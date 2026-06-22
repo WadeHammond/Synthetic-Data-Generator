@@ -8,58 +8,152 @@ param resourceToken string
 param tags object
 
 @secure()
-@description('LLM API key (Anthropic). Optional.')
+@description('LLM API key (Anthropic). Empty => the app runs in DEMO_MOCK mode.')
 param anthropicApiKey string = ''
 
-// Linux App Service plan. B1 (1.75 GB RAM) is a safe floor for pandas/data generation.
-resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: 'plan-${resourceToken}'
+var hasKey = !empty(anthropicApiKey)
+// Public placeholder image used only for the initial provision. azd builds the real
+// image from the Dockerfile, pushes it to the registry below, and updates this app.
+var placeholderImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+
+// ── Observability: Log Analytics + Application Insights ───────────────────────
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: 'log-${resourceToken}'
   location: location
   tags: tags
-  sku: {
-    name: 'B1'
-  }
-  kind: 'linux'
   properties: {
-    reserved: true
+    sku: { name: 'PerGB2018' }
+    retentionInDays: 30
   }
 }
 
-// FastAPI web app. The 'azd-service-name' tag MUST match the service key ('web') in azure.yaml.
-resource web 'Microsoft.Web/sites@2023-12-01' = {
-  name: 'app-${resourceToken}'
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: 'appi-${resourceToken}'
   location: location
-  tags: union(tags, { 'azd-service-name': 'web' })
+  tags: tags
+  kind: 'web'
   properties: {
-    serverFarmId: plan.id
-    httpsOnly: true
-    siteConfig: {
-      linuxFxVersion: 'PYTHON|3.12'
-      // Oryx builds from requirements.txt; this command serves the FastAPI app.
-      appCommandLine: 'python -m uvicorn demo_app:app --host 0.0.0.0 --port 8000'
-      ftpsState: 'Disabled'
-      minTlsVersion: '1.2'
-      appSettings: [
-        {
-          name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
-          value: 'true'
-        }
-        {
-          name: 'WEBSITES_PORT'
-          value: '8000'
-        }
-        {
-          name: 'ANTHROPIC_API_KEY'
-          value: anthropicApiKey
-        }
-        // Set to '1' to run without any LLM key (returns mock summaries).
-        {
-          name: 'DEMO_MOCK'
-          value: empty(anthropicApiKey) ? '1' : '0'
-        }
-      ]
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
+  }
+}
+
+// ── User-assigned identity (so the container app can pull from ACR) ───────────
+resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'id-${resourceToken}'
+  location: location
+  tags: tags
+}
+
+// ── Azure Container Registry ──────────────────────────────────────────────────
+resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
+  name: 'acr${resourceToken}'
+  location: location
+  tags: tags
+  sku: { name: 'Basic' }
+  properties: {
+    adminUserEnabled: false
+  }
+}
+
+// Grant the identity AcrPull on the registry (built-in role id).
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: registry
+  name: guid(registry.id, identity.id, 'AcrPull')
+  properties: {
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Container Apps managed environment (wired to Log Analytics) ───────────────
+resource caeEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: 'cae-${resourceToken}'
+  location: location
+  tags: tags
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalytics.properties.customerId
+        sharedKey: logAnalytics.listKeys().primarySharedKey
+      }
     }
   }
 }
 
-output WEB_URI string = 'https://${web.properties.defaultHostName}'
+// ── The web app ───────────────────────────────────────────────────────────────
+// The 'azd-service-name' tag MUST match the service key ('web') in azure.yaml so
+// azd knows which container app to deploy the built image to.
+// minReplicas == maxReplicas == 1: DuckDB is single-writer and the project files
+// live on the (ephemeral) container filesystem, so we pin to one instance.
+resource web 'Microsoft.App/containerApps@2024-03-01' = {
+  name: 'ca-web-${resourceToken}'
+  location: location
+  tags: union(tags, { 'azd-service-name': 'web' })
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${identity.id}': {}
+    }
+  }
+  properties: {
+    managedEnvironmentId: caeEnv.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8000
+        transport: 'auto'
+      }
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: identity.id
+        }
+      ]
+      secrets: hasKey ? [
+        {
+          name: 'anthropic-api-key'
+          value: anthropicApiKey
+        }
+      ] : []
+    }
+    template: {
+      containers: [
+        {
+          name: 'web'
+          image: placeholderImage
+          resources: {
+            cpu: json('1.0')
+            memory: '2.0Gi'
+          }
+          env: concat([
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              value: appInsights.properties.ConnectionString
+            }
+            {
+              name: 'DEMO_MOCK'
+              value: hasKey ? '0' : '1'
+            }
+          ], hasKey ? [
+            {
+              name: 'ANTHROPIC_API_KEY'
+              secretRef: 'anthropic-api-key'
+            }
+          ] : [])
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
+    }
+  }
+}
+
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.properties.loginServer
+output WEB_URI string = 'https://${web.properties.configuration.ingress.fqdn}'

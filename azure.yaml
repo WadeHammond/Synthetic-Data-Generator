@@ -5,5 +5,10 @@ metadata:
 services:
   web:
     project: .
-    language: py
-    host: appservice
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      context: .
+      # Build the image in Azure Container Registry (ACR Tasks) instead of locally,
+      # so no local Docker daemon is required for `azd up`.
+      remoteBuild: true
