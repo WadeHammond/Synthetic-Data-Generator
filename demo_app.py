@@ -17,7 +17,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, field_validator
 
-from data_layer import DataLayer
+from data_layer import DataLayer, clean_column_name
+from sic_catalog import SIC_CATALOG
 
 # ── LLM backend ───────────────────────────────────────────────────────────────
 _MOCK_MODE = os.getenv("DEMO_MOCK", "0") == "1"
@@ -68,51 +69,78 @@ MODELS = {
     "gpt-4o-mini":               "GPT-4o Mini",
 }
 FILE_FORMATS = ["csv", "json", "parquet", "txt", "xlsx"]
-INDUSTRIES = {
-    "financial":      "Financial Services & Insurance",
-    "energy":         "Energy & Oil and Gas",
-    "healthcare":     "Healthcare & Pharmaceuticals",
-    "technology":     "Technology / IT & Software",
-    "construction":   "Construction & Real Estate",
-    "agriculture":    "Agriculture & Food Production",
-    "manufacturing":  "Manufacturing",
-    "retail":         "Retail & E-Commerce",
-    "transportation": "Transportation & Logistics",
-    "media":          "Media, Entertainment & Tourism",
-}
+# ── Industry catalog (SIC divisions → subindustries) ───────────────────────────
+# The public "industry" identifier used throughout the app is the *subindustry*
+# key (globally unique). Tables authored as "<entity>_id" are normalized to
+# "<entity>". INDUSTRIES stays a flat {sub_key: label} map so existing validation
+# and label lookups keep working; INDUSTRY_TREE drives the two-level UI dropdown.
+def _normalize_tables(tables):
+    out = []
+    for tname, cols in tables:
+        if tname.endswith("_id"):
+            tname = tname[:-3]
+        out.append((tname, list(cols)))
+    return out
 
-# Simulated file-source format per table (shown as badges in the UI)
-_MOCK_SOURCES = {
-    "financial":      {"customers": "JSON",  "products": "CSV",        "accounts": "Parquet",       "transactions": "JSON"},
-    "energy":         {"plants": "CSV",      "meters": "JSON",         "consumption_records": "Parquet", "maintenance_logs": "CSV"},
-    "healthcare":     {"doctors": "CSV",     "patients": "JSON",       "appointments": "Parquet",   "prescriptions": "CSV"},
-    "technology":     {"employees": "JSON",  "projects": "CSV",        "bugs": "JSON",              "deployments": "Parquet"},
-    "construction":   {"properties": "CSV",  "agents": "JSON",         "listings": "Parquet",       "transactions": "CSV"},
-    "agriculture":    {"farms": "CSV",       "crops": "JSON",          "harvests": "Parquet",       "distributors": "CSV"},
-    "manufacturing":  {"facilities": "CSV",  "equipment": "JSON",      "production_runs": "Parquet","quality_checks": "CSV"},
-    "retail":         {"products": "CSV",    "customers": "JSON",      "orders": "Parquet",         "order_items": "CSV"},
-    "transportation": {"vehicles": "JSON",   "drivers": "CSV",         "routes": "Parquet",         "shipments": "JSON"},
-    "media":          {"hotels": "CSV",      "rooms": "JSON",          "guests": "Parquet",         "reservations": "CSV"},
-}
+_SUB_INDEX: dict[str, dict] = {}     # sub_key -> {label, blurb, tables, vocab}
+_SUB_DIVISION: dict[str, str] = {}   # sub_key -> division label
+INDUSTRIES: dict[str, str] = {}      # sub_key -> sub label (validation + lookups)
+INDUSTRY_TREE: list[dict] = []       # [{key, label, subindustries:[{key,label}]}]
+
+for _dkey, _dval in SIC_CATALOG.items():
+    _subs = []
+    for _skey, _sval in _dval["subs"].items():
+        _SUB_INDEX[_skey] = {
+            "label":  _sval["label"],
+            "blurb":  _sval.get("blurb", ""),
+            "tables": _normalize_tables(_sval["tables"]),
+            "vocab":  _sval.get("vocab", {}),
+        }
+        _SUB_DIVISION[_skey] = _dval["label"]
+        INDUSTRIES[_skey]    = _sval["label"]
+        _subs.append({"key": _skey, "label": _sval["label"]})
+    INDUSTRY_TREE.append({"key": _dkey, "label": _dval["label"], "subindustries": _subs})
+
+# Simulated source-file format per table (UI badges), assigned round-robin.
+_FILE_FMT_BADGES = ["CSV", "JSON", "Parquet"]
+def _mock_sources(subkey: str) -> dict:
+    entry = _SUB_INDEX.get(subkey)
+    if not entry:
+        return {}
+    return {tname: _FILE_FMT_BADGES[i % len(_FILE_FMT_BADGES)]
+            for i, (tname, _cols) in enumerate(entry["tables"])}
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
-def _call_llm(model: str, system: str, user: str) -> str:
+def _llm_provider_route(model: str) -> str:
+    """Prefix the model id with its provider so litellm targets the right backend
+    even when its built-in model map predates the model id (e.g. on Azure)."""
+    if model.startswith("claude"):
+        return f"anthropic/{model}"
+    if model.startswith(("gpt", "o1", "o3", "o4")):
+        return f"openai/{model}"
+    return model
+
+
+def _call_llm(model: str, system: str, user: str, max_tokens: int = 8192) -> str:
+    """Call the configured LLM backend. The model menu (Claude Sonnet/Haiku, GPT-4o)
+    all accept `temperature`; do not add Opus 4.7/4.8 or Fable here without removing
+    `temperature`, which those models reject with a 400."""
     if _BACKEND == "litellm":
         r = _llm.completion(
-            model=model, temperature=0.7,
+            model=_llm_provider_route(model), temperature=0.7, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system},
                       {"role": "user",   "content": user}],
         )
         return r.choices[0].message.content
     if _BACKEND == "anthropic":
         r = _anth.Anthropic().messages.create(
-            model=model, max_tokens=4096, system=system,
+            model=model, max_tokens=max_tokens, system=system,
             messages=[{"role": "user", "content": user}],
         )
         return r.content[0].text
     if _BACKEND == "openai":
         r = _oai.OpenAI().chat.completions.create(
-            model=model, temperature=0.7,
+            model=model, temperature=0.7, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system},
                       {"role": "user",   "content": user}],
         )
@@ -155,58 +183,42 @@ Use clean snake_case column names only: e.g. doctor_id, first_name, specialty, e
 Rules: IDs sequential from 1. FK values reference real parent IDs. Parent tables first.
 Dates: "YYYY-MM-DD". Numbers: JSON numbers."""
 
-_PROMPTS = {
-    "financial": (
-        "Generate a financial services & insurance database with 4 tables "
-        "(customers, products, accounts, transactions). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "energy": (
-        "Generate an energy & oil/gas database with 4 tables "
-        "(plants, meters, consumption_records, maintenance_logs). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "healthcare": (
-        "Generate a healthcare & pharmaceuticals database with 4 tables "
-        "(doctors, patients, appointments, prescriptions). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "technology": (
-        "Generate a technology/IT & software company database with 4 tables "
-        "(employees, projects, bugs, deployments). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "construction": (
-        "Generate a construction & real estate database with 4 tables "
-        "(properties, agents, listings, transactions). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "agriculture": (
-        "Generate an agriculture & food production database with 4 tables "
-        "(farms, crops, harvests, distributors). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "manufacturing": (
-        "Generate a manufacturing operations database with 4 tables "
-        "(facilities, equipment, production_runs, quality_checks). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "retail": (
-        "Generate a retail & e-commerce database with 4 tables "
-        "(products, customers, orders, order_items). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "transportation": (
-        "Generate a transportation & logistics database with 4 tables "
-        "(vehicles, drivers, routes, shipments). "
-        "Make the tables relational with proper foreign key references."
-    ),
-    "media": (
-        "Generate a media, entertainment & tourism database with 4 tables "
-        "(hotels, rooms, guests, reservations). "
-        "Make the tables relational with proper foreign key references."
-    ),
-}
+def _messify(col: str) -> str:
+    """Render a clean snake_case column as a 'messy' display name (spaces, casing,
+    abbreviations) so the column-cleaning step has something to normalize."""
+    parts = col.split("_")
+    out = []
+    for p in parts:
+        u = p.lower()
+        if u == "id":
+            out.append("ID")
+        elif u == "pct":
+            out.append("%")
+        elif u in ("num", "no"):
+            out.append("No.")
+        else:
+            out.append(p.capitalize())
+    return " ".join(out)
+
+
+def _build_llm_prompt(subkey: str, messy: bool) -> str:
+    """Build a subindustry-tailored instruction describing the desired relational
+    schema, so the LLM produces domain-accurate data for that specific industry."""
+    entry = _SUB_INDEX[subkey]
+    lines = []
+    for tname, cols in entry["tables"]:
+        disp = [_messify(c) if messy else c for c in cols]
+        lines.append(f"  - {tname}({', '.join(disp)})")
+    spec = "\n".join(lines)
+    return (
+        f"Generate a realistic {entry['label']} database for a business that "
+        f"{entry['blurb']}\n"
+        f"Use these relational tables and columns as the schema (preserve the "
+        f"foreign-key links so the tables join correctly):\n{spec}\n"
+        f"Populate every column with values that are domain-accurate and realistic "
+        f"for this specific industry — names, dates, amounts, categories, and codes "
+        f"should all look like genuine {entry['label']} data, never placeholders."
+    )
 
 
 def _extract_json(text: str) -> str:
@@ -421,6 +433,11 @@ def _make_mock_cell(col: str, row_num: int, variety_idx: int, company_name: str 
                 "level", "limit", "reorder", "remaining", "onhand", "on_hand"}
     if toks & QTY_TOKS:
         return [100, 250, 40, 500, 75, 320, 180, 60, 420, 90, 155][vi % 11]
+    if tok("experience", "exp", "yoe", "tenure", "seniority") or \
+       (tok("yrs", "years", "yr") and not (toks & DATE_TOKS)):
+        return [3, 8, 12, 5, 18, 7, 15, 2, 22, 10, 6][vi % 11]
+    if tok("age"):
+        return [27, 34, 41, 22, 58, 30, 45, 19, 63, 38, 51][vi % 11]
     if tok("duration", "minutes", "mins", "hours", "hrs", "seconds", "secs"):
         return [5, 10, 15, 20, 8, 12, 30, 7, 25, 18, 45][vi % 11]
     if tok("weight", "grams", "gram", "kg", "lbs", "oz", "ounce"):
@@ -625,6 +642,28 @@ def _infer_col_type(col: str) -> str:
     return "TEXT"
 
 
+def _retype_from_values(columns: list[dict], rows: list[list]) -> None:
+    """Align each mock column's declared type with the values actually generated.
+
+    The name-based value generator and the name-based type guesser can disagree
+    (e.g. "Yrs. Experience" is declared INTEGER but yields a text fallback), which
+    makes the downstream Postgres INSERT fail. Re-deriving the type from the real
+    values guarantees the column type always matches its data. Mutates `columns`.
+    """
+    for ci, col in enumerate(columns):
+        vals = [r[ci] for r in rows if ci < len(r) and r[ci] is not None]
+        if not vals:
+            continue
+        if all(isinstance(v, bool) for v in vals):
+            col["type"] = "BOOLEAN"
+        elif all(isinstance(v, int) and not isinstance(v, bool) for v in vals):
+            col["type"] = "INTEGER"
+        elif all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+            col["type"] = "DECIMAL"
+        else:
+            col["type"] = "TEXT"
+
+
 def _generate_mock_from_columns(table_names: list[str], columns: list[str],
                                  num_rows: int, company_name: str = "",
                                  call_offset: int = 0) -> dict:
@@ -640,12 +679,21 @@ def _generate_mock_from_columns(table_names: list[str], columns: list[str],
             vi = call_offset + tbl_idx * num_rows + i
             row_ctx = _make_row_ctx(vi, company_name)
             rows.append([_make_mock_cell(c, i + 1, vi, company_name, row_ctx) for c in columns])
-        tables.append({
-            "name": tname,
-            "columns": [{"name": c, "type": _infer_col_type(c)} for c in columns],
-            "rows": rows,
-        })
+        cols = [{"name": c, "type": _infer_col_type(c)} for c in columns]
+        _retype_from_values(cols, rows)
+        tables.append({"name": tname, "columns": cols, "rows": rows})
     return {"tables": tables}
+
+
+def _mock_value(col, row_num, vi, vocab, company_name="", row_ctx=None):
+    """Return a domain value from the subindustry vocab when the column matches one,
+    otherwise fall back to the semantic mock-cell generator."""
+    vals = vocab.get(col)
+    if vals:
+        return vals[vi % len(vals)]
+    if row_ctx is None:
+        row_ctx = _make_row_ctx(vi, company_name)
+    return _make_mock_cell(col, row_num, vi, company_name, row_ctx)
 
 
 # Incremented on every generate_data call so each button press yields different values.
@@ -657,35 +705,38 @@ def generate_data(industry: str, model: str, messy: bool,
                   num_rows: int | None = None, num_cols: int | None = None,
                   custom_columns: list[str] | None = None) -> dict:
     global _gen_call_count
+    entry = _SUB_INDEX.get(industry)
+    if entry is None:
+        raise RuntimeError(f"Unknown subindustry: {industry!r}")
+    vocab = entry["vocab"]
+
     if _MOCK_MODE:
         _gen_call_count += 1
-        # 37 is coprime with 11 (list size) so every call shifts to a different
-        # position in each value list.  Mod 1000 keeps the number manageable.
+        # 37 is coprime with the value-list sizes so every call shifts position.
         call_offset = (_gen_call_count * 37) % 1000
-
-        raw = _MOCK_DATA_MESSY[industry] if messy else _MOCK_DATA_CLEAN[industry]
         target_rows = num_rows if num_rows is not None else 10
 
         if custom_columns:
-            table_names = [t["name"] for t in raw["tables"]]
+            table_names = [t for t, _c in entry["tables"]]
             return _generate_mock_from_columns(
                 table_names, custom_columns, target_rows, company_name, call_offset
             )
 
-        # No custom columns — regenerate every table fresh from its own column names.
-        # This makes values company-specific and different on every button press.
+        # Build every table fresh from the subindustry's own schema, drawing
+        # domain-specific values from its vocab so the data fits the industry.
         result_tables = []
-        for tbl_idx, tbl in enumerate(raw["tables"]):
-            cols = tbl["columns"]
-            if num_cols is not None:
-                cols = cols[:num_cols]
-            col_names = [c["name"] for c in cols]
+        for tbl_idx, (tname, cols) in enumerate(entry["tables"]):
+            use_cols = cols if num_cols is None else cols[:num_cols]
             rows = []
             for i in range(target_rows):
                 vi = call_offset + tbl_idx * target_rows + i
                 row_ctx = _make_row_ctx(vi, company_name)
-                rows.append([_make_mock_cell(c, i + 1, vi, company_name, row_ctx) for c in col_names])
-            result_tables.append({"name": tbl["name"], "columns": cols, "rows": rows})
+                rows.append([_mock_value(c, i + 1, vi, vocab, company_name, row_ctx)
+                             for c in use_cols])
+            disp = [_messify(c) if messy else c for c in use_cols]
+            coldefs = [{"name": d, "type": _infer_col_type(c)} for d, c in zip(disp, use_cols)]
+            _retype_from_values(coldefs, rows)
+            result_tables.append({"name": tname, "columns": coldefs, "rows": rows})
         return {"tables": result_tables}
 
     # Build system prompt with dynamic constraints
@@ -703,1229 +754,17 @@ def generate_data(industry: str, model: str, messy: bool,
     base   = _GEN_SYSTEM_MESSY_BASE if messy else _GEN_SYSTEM_CLEAN_BASE
     system = base + ("\n" + "\n".join(constraints) if constraints else "")
 
-    prompt = _PROMPTS[industry]
+    prompt = _build_llm_prompt(industry, messy)
     if company_name or company_context:
         intro = f"This database is for {company_name}" if company_name else "This database is for a company"
         if company_context:
             intro += f", which {company_context.strip().rstrip('.')}"
-        prompt = (f"{intro}. {prompt}\n"
+        prompt = (f"{intro}.\n{prompt}\n"
                   "Tailor all values, names, amounts, and dates to be realistic for this specific company.")
     raw = _call_llm(model, system, prompt)
     return json.loads(_extract_json(raw))
 
 
-# ── Mock data — MESSY column names ────────────────────────────────────────────
-_MOCK_DATA_MESSY: dict[str, dict] = {
-    "healthcare": {"tables": [
-        {"name": "doctors", "columns": [
-            {"name": "Doctor ID",       "type": "INTEGER"},
-            {"name": "First Name",      "type": "TEXT"},
-            {"name": "Last Name",       "type": "TEXT"},
-            {"name": "SPECIALTY",       "type": "TEXT"},
-            {"name": "Yrs. Experience", "type": "INTEGER"},
-            {"name": "E-Mail",          "type": "TEXT"}],
-         "rows": [
-            [1,  "Sarah",   "Chen",     "Cardiology",    18, "s.chen@hospital.org"],
-            [2,  "Marcus",  "Webb",     "Neurology",     12, "m.webb@hospital.org"],
-            [3,  "Elena",   "Rossi",    "Pediatrics",     9, "e.rossi@hospital.org"],
-            [4,  "James",   "Okafor",   "Orthopedics",   22, "j.okafor@hospital.org"],
-            [5,  "Priya",   "Sharma",   "Oncology",      15, "p.sharma@hospital.org"],
-            [6,  "Daniel",  "Park",     "Dermatology",    7, "d.park@hospital.org"],
-            [7,  "Amara",   "Diallo",   "Psychiatry",    11, "a.diallo@hospital.org"],
-            [8,  "Thomas",  "Mueller",  "Radiology",     20, "t.mueller@hospital.org"],
-            [9,  "Sofia",   "Torres",   "Endocrinology", 14, "s.torres@hospital.org"],
-            [10, "William", "Nakamura", "Emergency Med",  6, "w.nakamura@hospital.org"]]},
-        {"name": "patients", "columns": [
-            {"name": "Patient ID",        "type": "INTEGER"},
-            {"name": "First Name",        "type": "TEXT"},
-            {"name": "Last Name",         "type": "TEXT"},
-            {"name": "Date-of-Birth",     "type": "DATE"},
-            {"name": "GENDER",            "type": "TEXT"},
-            {"name": "Blood Type",        "type": "TEXT"},
-            {"name": "Primary Doctor ID", "type": "INTEGER"}],
-         "rows": [
-            [1,  "Olivia",  "Hart",    "1985-03-12", "F", "A+",  1],
-            [2,  "Ethan",   "Brooks",  "1972-07-28", "M", "O-",  2],
-            [3,  "Mia",     "Gonzalez","1990-11-05", "F", "B+",  3],
-            [4,  "Noah",    "Kim",     "1965-01-19", "M", "AB+", 4],
-            [5,  "Zara",    "Ali",     "1998-06-30", "F", "O+",  1],
-            [6,  "Liam",    "Fischer", "1958-09-14", "M", "A-",  5],
-            [7,  "Chloe",   "Petit",   "2002-04-22", "F", "B-",  3],
-            [8,  "Elijah",  "Brown",   "1980-12-03", "M", "O+",  6],
-            [9,  "Amelia",  "Ivanova", "1975-08-17", "F", "A+",  7],
-            [10, "Lucas",   "Nguyen",  "1993-02-09", "M", "AB-", 2]]},
-        {"name": "appointments", "columns": [
-            {"name": "Appt. ID",       "type": "INTEGER"},
-            {"name": "Patient ID",     "type": "INTEGER"},
-            {"name": "Doctor ID",      "type": "INTEGER"},
-            {"name": "Appt. Date",     "type": "DATE"},
-            {"name": "STATUS",         "type": "TEXT"},
-            {"name": "Chief Complaint","type": "TEXT"}],
-         "rows": [
-            [1,  1,  1,  "2025-01-08", "Completed",  "Chest pain and shortness of breath"],
-            [2,  2,  2,  "2025-01-10", "Completed",  "Persistent headaches"],
-            [3,  3,  3,  "2025-01-14", "Scheduled",  "Annual wellness check"],
-            [4,  4,  4,  "2025-01-15", "Completed",  "Right knee pain"],
-            [5,  5,  1,  "2025-01-17", "Cancelled",  "Palpitations follow-up"],
-            [6,  6,  5,  "2025-01-20", "Scheduled",  "Fatigue and weight loss"],
-            [7,  7,  3,  "2025-01-21", "Completed",  "Rash on forearm"],
-            [8,  8,  6,  "2025-01-22", "Completed",  "Anxiety and sleep issues"],
-            [9,  9,  7,  "2025-01-24", "Scheduled",  "Mood swings evaluation"],
-            [10, 10, 2,  "2025-01-27", "Completed",  "Dizziness and nausea"]]},
-        {"name": "prescriptions", "columns": [
-            {"name": "Rx ID",             "type": "INTEGER"},
-            {"name": "Patient ID",        "type": "INTEGER"},
-            {"name": "Doctor ID",         "type": "INTEGER"},
-            {"name": "Medication",        "type": "TEXT"},
-            {"name": "Dosage/Freq.",      "type": "TEXT"},
-            {"name": "Date Prescribed",   "type": "DATE"},
-            {"name": "Refills Remaining", "type": "INTEGER"}],
-         "rows": [
-            [1,  1,  1,  "Metoprolol",    "50mg once daily",   "2025-01-08", 3],
-            [2,  2,  2,  "Sumatriptan",   "100mg as needed",   "2025-01-10", 5],
-            [3,  4,  4,  "Ibuprofen",     "400mg 3x daily",    "2025-01-15", 2],
-            [4,  6,  5,  "Levothyroxine", "75mcg once daily",  "2025-01-20", 11],
-            [5,  8,  6,  "Sertraline",    "50mg once daily",   "2025-01-22", 6],
-            [6,  9,  7,  "Escitalopram",  "10mg once daily",   "2025-01-24", 5],
-            [7,  10, 2,  "Meclizine",     "25mg as needed",    "2025-01-27", 3],
-            [8,  3,  3,  "Amoxicillin",   "500mg 3x daily",    "2025-01-14", 0],
-            [9,  5,  1,  "Atenolol",      "25mg once daily",   "2025-01-17", 4],
-            [10, 7,  3,  "Hydrocortisone","1% cream 2x daily", "2025-01-21", 2]]}
-    ]},
-    "financial": {"tables": [
-        {"name": "customers", "columns": [
-            {"name": "CUSTOMER_ID",  "type": "INTEGER"},
-            {"name": "First Name",   "type": "TEXT"},
-            {"name": "Last Name",    "type": "TEXT"},
-            {"name": "E-Mail",       "type": "TEXT"},
-            {"name": "Credit Score", "type": "INTEGER"},
-            {"name": "Member Since", "type": "DATE"}],
-         "rows": [
-            [1,  "Rachel",  "Monroe",    "r.monroe@email.com",   780, "2018-03-15"],
-            [2,  "Derek",   "Sandoval",  "d.sandoval@email.com", 650, "2020-07-22"],
-            [3,  "Ingrid",  "Svensson",  "i.svensson@email.com", 820, "2016-01-08"],
-            [4,  "Carlos",  "Reyes",     "c.reyes@email.com",    590, "2022-11-30"],
-            [5,  "Fatima",  "Al-Rashid", "f.alrashid@email.com", 740, "2019-05-17"],
-            [6,  "George",  "Papadakis", "g.papadakis@email.com",670, "2021-09-04"],
-            [7,  "Mei",     "Huang",     "m.huang@email.com",    800, "2017-06-20"],
-            [8,  "Aaron",   "Mitchell",  "a.mitchell@email.com", 720, "2020-02-14"],
-            [9,  "Natasha", "Petrov",    "n.petrov@email.com",   610, "2023-04-01"],
-            [10, "Oliver",  "Adeyemi",   "o.adeyemi@email.com",  755, "2018-12-19"]]},
-        {"name": "products", "columns": [
-            {"name": "Product ID",      "type": "INTEGER"},
-            {"name": "Product Name",    "type": "TEXT"},
-            {"name": "CATEGORY",        "type": "TEXT"},
-            {"name": "Interest Rate %", "type": "DECIMAL"},
-            {"name": "Min. Balance",    "type": "DECIMAL"}],
-         "rows": [
-            [1,  "Premium Checking",     "Checking",      0.01,    500.00],
-            [2,  "High-Yield Savings",   "Savings",       4.50,   1000.00],
-            [3,  "Standard Checking",    "Checking",      0.00,      0.00],
-            [4,  "Money Market Account", "Savings",       4.10,   5000.00],
-            [5,  "Platinum Credit Card", "Credit Card",  18.99,      0.00],
-            [6,  "Cash-Back Card",       "Credit Card",  21.49,      0.00],
-            [7,  "Auto Loan",            "Personal Loan",  6.75,    0.00],
-            [8,  "Personal Loan",        "Personal Loan", 11.25,    0.00],
-            [9,  "Student Savings",      "Savings",        3.80,  250.00],
-            [10, "Business Checking",    "Checking",       0.02, 2500.00]]},
-        {"name": "accounts", "columns": [
-            {"name": "Account ID",  "type": "INTEGER"},
-            {"name": "CUSTOMER_ID", "type": "INTEGER"},
-            {"name": "Product ID",  "type": "INTEGER"},
-            {"name": "BALANCE ($)", "type": "DECIMAL"},
-            {"name": "Currency",    "type": "TEXT"},
-            {"name": "Date Opened", "type": "DATE"}],
-         "rows": [
-            [1,  1,  1,  12450.00, "USD", "2018-03-20"],
-            [2,  1,  2,  45200.75, "USD", "2019-06-01"],
-            [3,  2,  3,   3820.50, "USD", "2020-07-25"],
-            [4,  3,  4,  98100.00, "USD", "2016-02-14"],
-            [5,  3,  5,      0.00, "USD", "2018-08-30"],
-            [6,  4,  3,   1205.30, "USD", "2022-12-05"],
-            [7,  5,  2,  27650.00, "USD", "2019-05-22"],
-            [8,  6,  6,      0.00, "USD", "2021-09-10"],
-            [9,  7,  4, 115000.00, "USD", "2017-07-01"],
-            [10, 8,  1,   8730.20, "USD", "2020-03-01"]]},
-        {"name": "transactions", "columns": [
-            {"name": "Txn ID",        "type": "INTEGER"},
-            {"name": "Account ID",    "type": "INTEGER"},
-            {"name": "Txn Date",      "type": "DATE"},
-            {"name": "AMOUNT",        "type": "DECIMAL"},
-            {"name": "Txn Type",      "type": "TEXT"},
-            {"name": "Description",   "type": "TEXT"},
-            {"name": "Merchant Name", "type": "TEXT"}],
-         "rows": [
-            [1,  1,  "2025-01-05",   52.30, "Debit",  "Grocery shopping",        "Whole Foods"],
-            [2,  1,  "2025-01-07", 1200.00, "Debit",  "Rent payment",            "Property Mgmt"],
-            [3,  2,  "2025-01-08",  500.00, "Credit", "Interest earned",         "Bank"],
-            [4,  3,  "2025-01-09",   87.45, "Debit",  "Restaurant dinner",       "The Oak Bistro"],
-            [5,  5,  "2025-01-10",  340.00, "Debit",  "Online purchase",         "Amazon"],
-            [6,  7,  "2025-01-12",  200.00, "Credit", "Payroll deposit",         "Employer"],
-            [7,  4,  "2025-01-14", 2500.00, "Debit",  "Wire transfer",           "Escrow Co."],
-            [8,  6,  "2025-01-15",   65.00, "Debit",  "Streaming subscriptions", "Netflix"],
-            [9,  9,  "2025-01-18", 4200.00, "Credit", "Investment withdrawal",   "Vanguard"],
-            [10, 10, "2025-01-20",  450.50, "Debit",  "Office supplies",         "Staples"]]}
-    ]},
-    "technology": {"tables": [
-        {"name": "employees", "columns": [
-            {"name": "Emp. ID",    "type": "INTEGER"},
-            {"name": "First Name", "type": "TEXT"},
-            {"name": "Last Name",  "type": "TEXT"},
-            {"name": "Job Title",  "type": "TEXT"},
-            {"name": "Team/Dept.", "type": "TEXT"},
-            {"name": "YoE (Yrs)", "type": "INTEGER"},
-            {"name": "E-Mail",    "type": "TEXT"}],
-         "rows": [
-            [1,  "Lena",   "Okafor",   "Senior Engineer",     "Backend", 8,  "l.okafor@techcorp.io"],
-            [2,  "Raj",    "Mehta",    "Product Manager",     "Product", 10, "r.mehta@techcorp.io"],
-            [3,  "Sofia",  "Bauer",    "UX Designer",         "Design",  5,  "s.bauer@techcorp.io"],
-            [4,  "Marcus", "Lee",      "Junior Engineer",     "Frontend",2,  "m.lee@techcorp.io"],
-            [5,  "Yuki",   "Tanaka",   "Data Engineer",       "Data",    6,  "y.tanaka@techcorp.io"],
-            [6,  "Aisha",  "Rahman",   "DevOps Engineer",     "Infra",   7,  "a.rahman@techcorp.io"],
-            [7,  "Carlos", "Vega",     "QA Engineer",         "QA",      4,  "c.vega@techcorp.io"],
-            [8,  "Emily",  "Brooks",   "Senior Engineer",     "Frontend",9,  "e.brooks@techcorp.io"],
-            [9,  "Dmitri", "Popov",    "ML Engineer",         "Data",    5,  "d.popov@techcorp.io"],
-            [10, "Nia",    "Asante",   "Engineering Manager", "Backend", 12, "n.asante@techcorp.io"]]},
-        {"name": "projects", "columns": [
-            {"name": "Project ID",   "type": "INTEGER"},
-            {"name": "Project Name", "type": "TEXT"},
-            {"name": "Lead Emp. ID", "type": "INTEGER"},
-            {"name": "Start Dt.",    "type": "DATE"},
-            {"name": "Due Dt.",      "type": "DATE"},
-            {"name": "STATUS",       "type": "TEXT"},
-            {"name": "Budget ($)",   "type": "DECIMAL"}],
-         "rows": [
-            [1,  "AIDA Platform v2",          10, "2024-07-01", "2025-03-31", "Active",    420000.00],
-            [2,  "Mobile App Redesign",        2,  "2024-09-01", "2025-02-28", "Completed", 185000.00],
-            [3,  "Data Pipeline Upgrade",      5,  "2024-10-15", "2025-05-30", "Active",    95000.00],
-            [4,  "Security Hardening",         6,  "2024-11-01", "2025-01-31", "Completed", 60000.00],
-            [5,  "Customer Portal",            2,  "2025-01-10", "2025-06-30", "Active",    230000.00],
-            [6,  "Analytics Dashboard",        9,  "2024-12-01", "2025-04-15", "Active",    140000.00],
-            [7,  "CI/CD Overhaul",             6,  "2025-01-15", "2025-03-15", "Active",    45000.00],
-            [8,  "API Rate Limiting",          1,  "2025-02-01", "2025-03-01", "Completed", 22000.00],
-            [9,  "ML Recommendation Engine",   9,  "2025-02-10", "2025-07-31", "Active",    310000.00],
-            [10, "Accessibility Audit",        3,  "2025-01-05", "2025-02-28", "Completed", 18000.00]]},
-        {"name": "bugs", "columns": [
-            {"name": "Bug ID",        "type": "INTEGER"},
-            {"name": "Project ID",    "type": "INTEGER"},
-            {"name": "Reporter ID",   "type": "INTEGER"},
-            {"name": "Title/Summary", "type": "TEXT"},
-            {"name": "SEVERITY",      "type": "TEXT"},
-            {"name": "Reported Dt.",  "type": "DATE"},
-            {"name": "STATUS",        "type": "TEXT"}],
-         "rows": [
-            [1,  1, 4,  "Login timeout not handled",      "High",     "2025-01-08", "Open"],
-            [2,  2, 7,  "Image upload fails on iOS",      "Medium",   "2025-01-10", "Closed"],
-            [3,  3, 5,  "Null pointer in ETL job",        "Critical", "2025-01-12", "Open"],
-            [4,  4, 6,  "TLS handshake error on load",    "High",     "2025-01-14", "Closed"],
-            [5,  5, 3,  "Button misaligned on Safari",    "Low",      "2025-01-16", "Open"],
-            [6,  6, 9,  "Chart renders NaN values",       "Medium",   "2025-01-18", "In Progress"],
-            [7,  1, 1,  "Session token not refreshed",    "Critical", "2025-01-20", "In Progress"],
-            [8,  7, 6,  "Pipeline fails on ARM arch",     "High",     "2025-01-22", "Open"],
-            [9,  9, 9,  "Model returns empty array",      "Medium",   "2025-01-24", "Open"],
-            [10, 5, 4,  "Form validation bypassed",       "High",     "2025-01-26", "In Progress"]]},
-        {"name": "deployments", "columns": [
-            {"name": "Deploy ID",   "type": "INTEGER"},
-            {"name": "Project ID",  "type": "INTEGER"},
-            {"name": "Deploy Dt.",  "type": "DATE"},
-            {"name": "Env.",        "type": "TEXT"},
-            {"name": "Version #",   "type": "TEXT"},
-            {"name": "Deployed By", "type": "INTEGER"},
-            {"name": "Success?",    "type": "BOOLEAN"}],
-         "rows": [
-            [1,  4, "2025-01-08", "Production", "v1.4.2",       6,  True],
-            [2,  2, "2025-01-10", "Staging",    "v2.1.0-rc1",   8,  True],
-            [3,  8, "2025-01-14", "Production", "v3.0.1",       1,  True],
-            [4,  2, "2025-01-18", "Production", "v2.1.0",       8,  True],
-            [5,  4, "2025-01-20", "Production", "v1.4.3",       6,  False],
-            [6,  1, "2025-01-22", "Staging",    "v2.0.0-beta",  10, True],
-            [7,  7, "2025-01-25", "Dev",        "v0.9.0",       6,  True],
-            [8,  3, "2025-01-27", "Staging",    "v4.2.0-alpha", 5,  True],
-            [9,  6, "2025-01-29", "Production", "v1.0.0",       9,  True],
-            [10, 5, "2025-02-01", "Dev",        "v0.3.0",       8,  True]]}
-    ]},
-    "retail": {"tables": [
-        {"name": "products", "columns": [
-            {"name": "Prod. ID",       "type": "INTEGER"},
-            {"name": "Product Name",   "type": "TEXT"},
-            {"name": "Category/Dept",  "type": "TEXT"},
-            {"name": "Unit Price ($)", "type": "DECIMAL"},
-            {"name": "Stock Qty.",     "type": "INTEGER"},
-            {"name": "SKU#",           "type": "TEXT"}],
-         "rows": [
-            [1,  "Wireless Headphones",          "Electronics",      79.99,  340,  "SKU-WH-001"],
-            [2,  "Yoga Mat",                     "Sports & Fitness", 34.99,  520,  "SKU-YM-002"],
-            [3,  "Stainless Steel Water Bottle", "Kitchen",          24.99,  810,  "SKU-WB-003"],
-            [4,  "Running Shoes (Size 10)",      "Footwear",        119.99,  145,  "SKU-RS-004"],
-            [5,  "Organic Coffee Beans 1lb",     "Grocery",          18.99, 1200,  "SKU-CB-005"],
-            [6,  "Laptop Stand",                 "Office",           49.99,  420,  "SKU-LS-006"],
-            [7,  "Resistance Band Set",          "Sports & Fitness", 22.99,  670,  "SKU-RB-007"],
-            [8,  "Ceramic Cookware Set",         "Kitchen",         149.99,   88,  "SKU-CS-008"],
-            [9,  "Bluetooth Speaker",            "Electronics",      59.99,  295,  "SKU-BS-009"],
-            [10, "Bamboo Cutting Board",         "Kitchen",          29.99,  430,  "SKU-CB-010"]]},
-        {"name": "customers", "columns": [
-            {"name": "Cust. ID",    "type": "INTEGER"},
-            {"name": "First Name",  "type": "TEXT"},
-            {"name": "Last Name",   "type": "TEXT"},
-            {"name": "E-Mail",      "type": "TEXT"},
-            {"name": "Member Tier", "type": "TEXT"},
-            {"name": "Join Date",   "type": "DATE"}],
-         "rows": [
-            [1,  "Hannah",  "Zhou",     "h.zhou@email.com",    "Gold",     "2022-03-14"],
-            [2,  "James",   "Carter",   "j.carter@email.com",  "Silver",   "2023-07-01"],
-            [3,  "Fatima",  "Hassan",   "f.hassan@email.com",  "Platinum", "2020-11-22"],
-            [4,  "Luca",    "Ferrari",  "l.ferrari@email.com", "Bronze",   "2024-01-09"],
-            [5,  "Sophie",  "Martin",   "s.martin@email.com",  "Gold",     "2021-05-30"],
-            [6,  "David",   "Osei",     "d.osei@email.com",    "Silver",   "2023-02-17"],
-            [7,  "Maria",   "Santos",   "m.santos@email.com",  "Platinum", "2019-08-05"],
-            [8,  "Alex",    "Kim",      "a.kim@email.com",     "Bronze",   "2024-03-28"],
-            [9,  "Priya",   "Kapoor",   "p.kapoor@email.com",  "Gold",     "2022-10-11"],
-            [10, "Ryan",    "Walsh",    "r.walsh@email.com",   "Silver",   "2023-06-04"]]},
-        {"name": "orders", "columns": [
-            {"name": "Order ID",    "type": "INTEGER"},
-            {"name": "Cust. ID",    "type": "INTEGER"},
-            {"name": "Order Dt.",   "type": "DATE"},
-            {"name": "TOTAL ($)",   "type": "DECIMAL"},
-            {"name": "STATUS",      "type": "TEXT"},
-            {"name": "Ship Method", "type": "TEXT"}],
-         "rows": [
-            [1,  3, "2025-01-05", 229.97, "Shipped",    "Express"],
-            [2,  1, "2025-01-07", 104.98, "Delivered",  "Standard"],
-            [3,  5, "2025-01-09",  34.99, "Delivered",  "Standard"],
-            [4,  7, "2025-01-11", 199.98, "Shipped",    "Express"],
-            [5,  2, "2025-01-13",  79.99, "Processing", "Standard"],
-            [6,  9, "2025-01-15",  67.98, "Delivered",  "Standard"],
-            [7,  3, "2025-01-17", 149.99, "Shipped",    "Express"],
-            [8,  6, "2025-01-19",  52.98, "Delivered",  "Economy"],
-            [9,  4, "2025-01-21", 119.99, "Processing", "Express"],
-            [10, 7, "2025-01-23",  94.97, "Delivered",  "Standard"]]},
-        {"name": "order_items", "columns": [
-            {"name": "Item ID",       "type": "INTEGER"},
-            {"name": "Order ID",      "type": "INTEGER"},
-            {"name": "Prod. ID",      "type": "INTEGER"},
-            {"name": "Qty.",          "type": "INTEGER"},
-            {"name": "Unit Price ($)","type": "DECIMAL"},
-            {"name": "Discount %",    "type": "DECIMAL"}],
-         "rows": [
-            [1,  1,  1,  1,  79.99, 0.00],
-            [2,  1,  8,  1, 149.99, 0.00],
-            [3,  2,  6,  2,  49.99, 0.00],
-            [4,  2,  2,  1,  34.99, 10.00],
-            [5,  3,  2,  1,  34.99, 0.00],
-            [6,  4,  4,  1, 119.99, 0.00],
-            [7,  4,  9,  1,  59.99, 10.00],
-            [8,  5,  1,  1,  79.99, 0.00],
-            [9,  6,  7,  2,  22.99, 0.00],
-            [10, 6,  3,  1,  24.99, 5.00]]}
-    ]},
-    "manufacturing": {"tables": [
-        {"name": "facilities", "columns": [
-            {"name": "Facility ID",          "type": "INTEGER"},
-            {"name": "Facility Name",        "type": "TEXT"},
-            {"name": "LOCATION",             "type": "TEXT"},
-            {"name": "Capacity (Units/Day)", "type": "INTEGER"},
-            {"name": "Year Built",           "type": "INTEGER"},
-            {"name": "Active?",              "type": "BOOLEAN"}],
-         "rows": [
-            [1,  "Northgate Plant",    "Detroit, MI",       2400, 1998, True],
-            [2,  "Riverside Works",    "Louisville, KY",    1800, 2005, True],
-            [3,  "Southfield Factory", "Nashville, TN",     3200, 2011, True],
-            [4,  "Eastbrook Hub",      "Cleveland, OH",     1500, 1995, False],
-            [5,  "Pacific Assembly",   "Portland, OR",      2100, 2018, True],
-            [6,  "Central Forge",      "Indianapolis, IN",  2800, 2002, True],
-            [7,  "Gulf Coast Plant",   "Houston, TX",       3500, 2015, True],
-            [8,  "Northern Press",     "Minneapolis, MN",   1900, 2008, True],
-            [9,  "Mountain Works",     "Denver, CO",        2200, 2020, True],
-            [10, "Atlantic Fab",       "Baltimore, MD",     2000, 2000, True]]},
-        {"name": "equipment", "columns": [
-            {"name": "Equip. ID",       "type": "INTEGER"},
-            {"name": "Facility ID",     "type": "INTEGER"},
-            {"name": "Equip. Name",     "type": "TEXT"},
-            {"name": "MANUFACTURER",    "type": "TEXT"},
-            {"name": "Mfg. Year",       "type": "INTEGER"},
-            {"name": "Last Maint. Dt.", "type": "DATE"}],
-         "rows": [
-            [1,  1,  "CNC Milling Machine",      "Haas Automation",  2010, "2025-01-03"],
-            [2,  1,  "Industrial Press",          "Schuler AG",       2008, "2024-12-15"],
-            [3,  2,  "Welding Robot",             "FANUC",            2015, "2025-01-10"],
-            [4,  3,  "Assembly Line Conveyor",    "Bosch Rexroth",    2012, "2025-01-08"],
-            [5,  3,  "Paint Booth",               "Eisenmann",        2014, "2024-11-20"],
-            [6,  5,  "Laser Cutter",              "Trumpf",           2019, "2025-01-05"],
-            [7,  6,  "Hydraulic Stamping Press",  "Schuler AG",       2003, "2024-10-30"],
-            [8,  7,  "Extrusion Machine",         "Krauss-Maffei",    2016, "2025-01-12"],
-            [9,  9,  "3D Metal Printer",          "EOS",              2021, "2025-01-15"],
-            [10, 10, "Quality Vision System",     "Keyence",          2018, "2025-01-07"]]},
-        {"name": "production_runs", "columns": [
-            {"name": "Run ID",         "type": "INTEGER"},
-            {"name": "Facility ID",    "type": "INTEGER"},
-            {"name": "Product Line",   "type": "TEXT"},
-            {"name": "Start Dt.",      "type": "DATE"},
-            {"name": "End Dt.",        "type": "DATE"},
-            {"name": "Units Produced", "type": "INTEGER"},
-            {"name": "SHIFT",          "type": "TEXT"}],
-         "rows": [
-            [1,  1,  "Automotive Parts",               "2025-01-06", "2025-01-10", 12400, "Day"],
-            [2,  2,  "HVAC Components",                "2025-01-07", "2025-01-09",  5600, "Day"],
-            [3,  3,  "Consumer Electronics Housing",   "2025-01-08", "2025-01-15", 22800, "Night"],
-            [4,  5,  "Precision Brackets",             "2025-01-06", "2025-01-08",  8400, "Day"],
-            [5,  6,  "Heavy Machinery Frames",         "2025-01-09", "2025-01-14",  6200, "Day"],
-            [6,  7,  "Plastic Extrusions",             "2025-01-10", "2025-01-20", 45000, "Night"],
-            [7,  9,  "Aerospace Prototypes",           "2025-01-13", "2025-01-17",   520, "Day"],
-            [8,  1,  "Automotive Parts",               "2025-01-13", "2025-01-17", 13200, "Night"],
-            [9,  3,  "Medical Device Casings",         "2025-01-16", "2025-01-22", 18600, "Day"],
-            [10, 10, "Structural Steel Components",    "2025-01-14", "2025-01-19",  9800, "Day"]]},
-        {"name": "quality_checks", "columns": [
-            {"name": "Check ID",      "type": "INTEGER"},
-            {"name": "Run ID",        "type": "INTEGER"},
-            {"name": "Equip. ID",     "type": "INTEGER"},
-            {"name": "Defect Rate %", "type": "DECIMAL"},
-            {"name": "Check Dt.",     "type": "DATE"},
-            {"name": "RESULT",        "type": "TEXT"},
-            {"name": "Inspector ID",  "type": "INTEGER"}],
-         "rows": [
-            [1,  1,  1,  0.8, "2025-01-11", "Pass", 3],
-            [2,  2,  3,  1.2, "2025-01-10", "Pass", 5],
-            [3,  3,  4,  2.1, "2025-01-16", "Fail", 7],
-            [4,  4,  6,  0.5, "2025-01-09", "Pass", 2],
-            [5,  5,  7,  3.4, "2025-01-15", "Fail", 4],
-            [6,  6,  8,  0.9, "2025-01-21", "Pass", 6],
-            [7,  7,  9,  0.3, "2025-01-18", "Pass", 1],
-            [8,  8,  1,  1.5, "2025-01-18", "Pass", 3],
-            [9,  9,  4,  0.7, "2025-01-23", "Pass", 7],
-            [10, 10, 10, 1.1, "2025-01-20", "Pass", 2]]}
-    ]},
-    "energy": {"tables": [
-        {"name": "plants", "columns": [
-            {"name": "Plant ID",        "type": "INTEGER"},
-            {"name": "Plant Name",      "type": "TEXT"},
-            {"name": "Energy Type",     "type": "TEXT"},
-            {"name": "Capacity (MW)",   "type": "DECIMAL"},
-            {"name": "Online Date",     "type": "DATE"},
-            {"name": "STATE",           "type": "TEXT"}],
-         "rows": [
-            [1,  "Sunridge Solar Farm",    "Solar",         250.0, "2021-06-15", "AZ"],
-            [2,  "Lakeside Wind Array",    "Wind",          180.0, "2019-03-22", "TX"],
-            [3,  "Rivergate Hydro",        "Hydroelectric", 400.0, "2005-09-01", "WA"],
-            [4,  "Westfield Gas Turbine",  "Natural Gas",   620.0, "2010-04-17", "TX"],
-            [5,  "Desert Peak Solar",      "Solar",         315.0, "2023-01-10", "NV"],
-            [6,  "Highland Wind Farm",     "Wind",          220.0, "2018-11-05", "IA"],
-            [7,  "Coastal Nuclear Sta.",   "Nuclear",      1100.0, "1988-07-30", "SC"],
-            [8,  "Clearwater Coal Plant",  "Coal",          750.0, "1995-02-14", "WV"],
-            [9,  "Northbay Biomass",       "Biomass",        85.0, "2017-08-19", "ME"],
-            [10, "Summit Geothermal",      "Geothermal",     45.0, "2020-05-28", "NV"]]},
-        {"name": "meters", "columns": [
-            {"name": "Meter ID",               "type": "INTEGER"},
-            {"name": "Plant ID",               "type": "INTEGER"},
-            {"name": "Meter Type",             "type": "TEXT"},
-            {"name": "Install Dt.",            "type": "DATE"},
-            {"name": "Last Reading (kWh)",     "type": "DECIMAL"},
-            {"name": "Status",                 "type": "TEXT"}],
-         "rows": [
-            [1,  1, "Generation",   "2021-06-15",  1842500.00, "Active"],
-            [2,  1, "Distribution", "2021-06-15",  1798000.00, "Active"],
-            [3,  2, "Generation",   "2019-03-22",  2310000.00, "Active"],
-            [4,  3, "Generation",   "2005-09-01",  8940000.00, "Active"],
-            [5,  4, "Generation",   "2010-04-17", 12450000.00, "Active"],
-            [6,  4, "Backup",       "2015-06-01",   340000.00, "Standby"],
-            [7,  5, "Generation",   "2023-01-10",   620000.00, "Active"],
-            [8,  7, "Generation",   "1988-07-30", 45600000.00, "Active"],
-            [9,  8, "Generation",   "1995-02-14", 38200000.00, "Active"],
-            [10, 9, "Generation",   "2017-08-19",  1840000.00, "Active"]]},
-        {"name": "consumption_records", "columns": [
-            {"name": "Record ID",         "type": "INTEGER"},
-            {"name": "Meter ID",          "type": "INTEGER"},
-            {"name": "Record Dt.",        "type": "DATE"},
-            {"name": "kWh Consumed",      "type": "DECIMAL"},
-            {"name": "Peak Demand (kW)",  "type": "DECIMAL"},
-            {"name": "Cost/kWh ($)",      "type": "DECIMAL"}],
-         "rows": [
-            [1,  1,  "2025-01-01",  6850.00,  320.5, 0.04],
-            [2,  3,  "2025-01-01", 18400.00,  890.0, 0.03],
-            [3,  5,  "2025-01-01", 14200.00,  680.0, 0.05],
-            [4,  8,  "2025-01-01", 48600.00, 1250.0, 0.06],
-            [5,  1,  "2025-01-08",  7200.00,  340.0, 0.04],
-            [6,  3,  "2025-01-08", 19100.00,  915.0, 0.03],
-            [7,  5,  "2025-01-08", 13800.00,  660.0, 0.05],
-            [8,  4,  "2025-01-08", 42300.00,  980.0, 0.06],
-            [9,  7,  "2025-01-08", 88500.00, 2100.0, 0.02],
-            [10, 10, "2025-01-08",  5100.00,  180.0, 0.07]]},
-        {"name": "maintenance_logs", "columns": [
-            {"name": "Log ID",        "type": "INTEGER"},
-            {"name": "Plant ID",      "type": "INTEGER"},
-            {"name": "Maint. Type",   "type": "TEXT"},
-            {"name": "Scheduled Dt.", "type": "DATE"},
-            {"name": "Completed Dt.", "type": "DATE"},
-            {"name": "Cost ($)",      "type": "DECIMAL"},
-            {"name": "Technician ID", "type": "INTEGER"}],
-         "rows": [
-            [1,  1, "Scheduled Inspection", "2025-01-05", "2025-01-05",  4200.00, 7],
-            [2,  3, "Turbine Overhaul",     "2025-01-10", "2025-01-14", 28000.00, 3],
-            [3,  4, "Filter Replacement",   "2025-01-08", "2025-01-08",  1800.00, 5],
-            [4,  2, "Blade Inspection",     "2025-01-12", "2025-01-13",  9500.00, 4],
-            [5,  7, "Annual Safety Audit",  "2025-01-15", "2025-01-20", 85000.00, 1],
-            [6,  5, "Panel Cleaning",       "2025-01-06", "2025-01-06",  2200.00, 8],
-            [7,  8, "Boiler Maintenance",   "2025-01-09", "2025-01-11", 15000.00, 6],
-            [8,  9, "Biomass Feeder Svc",   "2025-01-14", "2025-01-15",  6800.00, 2],
-            [9,  6, "Gearbox Inspection",   "2025-01-17", "2025-01-18", 12000.00, 4],
-            [10, 10,"Heat Exchanger Clean", "2025-01-20", "2025-01-20",  5500.00, 9]]}
-    ]},
-    "construction": {"tables": [
-        {"name": "properties", "columns": [
-            {"name": "Prop. ID",    "type": "INTEGER"},
-            {"name": "Address",     "type": "TEXT"},
-            {"name": "City",        "type": "TEXT"},
-            {"name": "# Bedrooms",  "type": "INTEGER"},
-            {"name": "# Bathrooms", "type": "DECIMAL"},
-            {"name": "Sq. Ft.",     "type": "INTEGER"},
-            {"name": "Year Built",  "type": "INTEGER"}],
-         "rows": [
-            [1,  "412 Maple St",      "Austin, TX",      3, 2.0, 1850, 1998],
-            [2,  "77 Lakeview Dr",    "Denver, CO",      4, 2.5, 2400, 2005],
-            [3,  "1902 Birch Ave",    "Seattle, WA",     2, 1.0,  980, 1985],
-            [4,  "38 Harbor Blvd",   "Miami, FL",       5, 3.5, 3800, 2018],
-            [5,  "514 Oak Ln",        "Nashville, TN",   3, 2.0, 1640, 2001],
-            [6,  "91 Crestwood Cir", "Phoenix, AZ",     4, 3.0, 2950, 2015],
-            [7,  "203 Elm St",        "Portland, OR",    2, 1.5, 1120, 1972],
-            [8,  "650 Ridgeline Rd",  "Scottsdale, AZ",  6, 4.0, 4600, 2010],
-            [9,  "15 Pinecrest Way",  "Boulder, CO",     3, 2.0, 1760, 2008],
-            [10, "744 Riverside Dr",  "Chicago, IL",     2, 2.0, 1350, 1994]]},
-        {"name": "agents", "columns": [
-            {"name": "Agent ID",   "type": "INTEGER"},
-            {"name": "First Name", "type": "TEXT"},
-            {"name": "Last Name",  "type": "TEXT"},
-            {"name": "License #",  "type": "TEXT"},
-            {"name": "Agency",     "type": "TEXT"},
-            {"name": "Yrs. Active","type": "INTEGER"}],
-         "rows": [
-            [1,  "Sandra", "Flores",    "TX-RE-48201", "Lone Star Realty",        12],
-            [2,  "Kevin",  "Park",      "CO-RE-39504", "Rocky Mountain Homes",     8],
-            [3,  "Tania",  "Okonkwo",   "WA-RE-71209", "Pacific Edge Properties", 15],
-            [4,  "Marco",  "DiSilva",   "FL-RE-55604", "SunCoast Group",           6],
-            [5,  "Laura",  "Jensen",    "TN-RE-62811", "Nashville Homefinders",   10],
-            [6,  "Aaron",  "Whitfield", "AZ-RE-44903", "Desert Sky Realty",        9],
-            [7,  "Priya",  "Nair",      "OR-RE-38017", "Green City Properties",    7],
-            [8,  "James",  "Holloway",  "AZ-RE-47220", "Pinnacle Luxury Homes",   18],
-            [9,  "Beth",   "Sievert",   "CO-RE-40118", "Summit Real Estate",       5],
-            [10, "Victor", "Cheng",     "IL-RE-52909", "Lakefront Realty",        11]]},
-        {"name": "listings", "columns": [
-            {"name": "Listing ID",    "type": "INTEGER"},
-            {"name": "Prop. ID",      "type": "INTEGER"},
-            {"name": "Agent ID",      "type": "INTEGER"},
-            {"name": "List Price ($)","type": "DECIMAL"},
-            {"name": "List Date",     "type": "DATE"},
-            {"name": "STATUS",        "type": "TEXT"},
-            {"name": "Days on Mkt.",  "type": "INTEGER"}],
-         "rows": [
-            [1,  1,  1,   485000.00, "2025-01-02", "Active",         13],
-            [2,  2,  2,   720000.00, "2025-01-04", "Under Contract",  9],
-            [3,  3,  3,   399000.00, "2024-12-20", "Sold",           28],
-            [4,  4,  4,  1250000.00, "2025-01-06", "Active",          9],
-            [5,  5,  5,   410000.00, "2025-01-03", "Active",         12],
-            [6,  6,  6,   680000.00, "2024-12-28", "Under Contract", 16],
-            [7,  7,  7,   325000.00, "2025-01-08", "Active",          7],
-            [8,  8,  8,  1895000.00, "2024-12-15", "Sold",           34],
-            [9,  9,  9,   545000.00, "2025-01-05", "Active",         10],
-            [10, 10, 10,  380000.00, "2025-01-01", "Under Contract", 14]]},
-        {"name": "transactions", "columns": [
-            {"name": "Txn ID",          "type": "INTEGER"},
-            {"name": "Listing ID",      "type": "INTEGER"},
-            {"name": "Sale Price ($)",  "type": "DECIMAL"},
-            {"name": "Close Date",      "type": "DATE"},
-            {"name": "Buyer Agent ID",  "type": "INTEGER"},
-            {"name": "Commission %",    "type": "DECIMAL"}],
-         "rows": [
-            [1,  3,   385000.00, "2025-01-17", 2,  2.5],
-            [2,  8,  1850000.00, "2025-01-18", 5,  2.5],
-            [3,  6,   665000.00, "2025-01-13", 9,  2.5],
-            [4,  2,   710000.00, "2025-01-13", 7,  2.5],
-            [5,  10,  372000.00, "2025-01-15", 3,  2.5],
-            [6,  1,   480000.00, "2025-01-15", 6,  2.5],
-            [7,  4,  1230000.00, "2025-01-15", 1,  2.5],
-            [8,  5,   405000.00, "2025-01-15", 4,  2.5],
-            [9,  7,   320000.00, "2025-01-15", 10, 2.5],
-            [10, 9,   535000.00, "2025-01-15", 2,  2.5]]}
-    ]},
-    "transportation": {"tables": [
-        {"name": "vehicles", "columns": [
-            {"name": "Vehicle ID",       "type": "INTEGER"},
-            {"name": "Make/Model",       "type": "TEXT"},
-            {"name": "Plate #",          "type": "TEXT"},
-            {"name": "Capacity (lbs)",   "type": "INTEGER"},
-            {"name": "Year",             "type": "INTEGER"},
-            {"name": "Last Svc. Dt.",    "type": "DATE"}],
-         "rows": [
-            [1,  "Freightliner Cascadia", "PLT-4821", 45000, 2020, "2025-01-04"],
-            [2,  "Kenworth T680",         "KWT-3390", 44000, 2019, "2024-12-20"],
-            [3,  "Peterbilt 579",         "PTB-8841", 46000, 2022, "2025-01-08"],
-            [4,  "Mack Anthem",           "MCK-7703", 43000, 2018, "2024-11-15"],
-            [5,  "Volvo VNL 860",         "VLV-5512", 44500, 2021, "2025-01-10"],
-            [6,  "International LT",      "INT-2294", 42000, 2020, "2024-12-30"],
-            [7,  "Western Star 5700",     "WST-6630", 45500, 2023, "2025-01-03"],
-            [8,  "Freightliner Cascadia", "PLT-9977", 45000, 2021, "2025-01-06"],
-            [9,  "Kenworth W900",         "KWT-1120", 48000, 2017, "2024-10-22"],
-            [10, "DAF XF",               "DAF-4401", 43500, 2022, "2025-01-12"]]},
-        {"name": "drivers", "columns": [
-            {"name": "Driver ID",    "type": "INTEGER"},
-            {"name": "First Name",   "type": "TEXT"},
-            {"name": "Last Name",    "type": "TEXT"},
-            {"name": "CDL #",        "type": "TEXT"},
-            {"name": "Hire Date",    "type": "DATE"},
-            {"name": "Rating (1-5)", "type": "DECIMAL"}],
-         "rows": [
-            [1,  "Tom",     "Barrett",    "CDL-TX-48021", "2018-03-14", 4.8],
-            [2,  "Rosa",    "Alvarez",    "CDL-CA-39002", "2020-07-01", 4.6],
-            [3,  "Wayne",   "Kowalski",   "CDL-IL-55489", "2015-01-22", 4.9],
-            [4,  "Linda",   "Freeman",    "CDL-FL-61003", "2022-05-10", 4.4],
-            [5,  "Jamal",   "Washington", "CDL-GA-70241", "2019-09-18", 4.7],
-            [6,  "Hector",  "Ruiz",       "CDL-AZ-33018", "2021-02-28", 4.5],
-            [7,  "Sandra",  "Pierce",     "CDL-OH-44902", "2016-11-05", 4.9],
-            [8,  "Mike",    "Thornton",   "CDL-PA-29801", "2017-08-15", 4.3],
-            [9,  "Yolanda", "Cruz",       "CDL-TX-52110", "2023-01-09", 4.2],
-            [10, "Greg",    "O'Neal",     "CDL-NC-38904", "2014-06-30", 4.8]]},
-        {"name": "routes", "columns": [
-            {"name": "Route ID",        "type": "INTEGER"},
-            {"name": "Route Name",      "type": "TEXT"},
-            {"name": "Origin City",     "type": "TEXT"},
-            {"name": "Dest. City",      "type": "TEXT"},
-            {"name": "Dist. (mi)",      "type": "INTEGER"},
-            {"name": "Est. Time (hrs)", "type": "DECIMAL"}],
-         "rows": [
-            [1,  "I-10 Sunbelt",      "Los Angeles, CA",   "Houston, TX",      1547, 22.5],
-            [2,  "I-90 Northern",     "Seattle, WA",       "Chicago, IL",      2064, 30.0],
-            [3,  "I-95 Eastern",      "Miami, FL",         "New York, NY",     1281, 18.5],
-            [4,  "I-80 Cross Country","San Francisco, CA", "Newark, NJ",       2899, 42.0],
-            [5,  "I-35 Midwest",      "Dallas, TX",        "Minneapolis, MN",  1150, 16.5],
-            [6,  "I-40 Mid-South",    "Los Angeles, CA",   "Memphis, TN",      1840, 27.0],
-            [7,  "I-70 Corridor",     "Denver, CO",        "Columbus, OH",     1250, 18.0],
-            [8,  "I-65 Southern",     "Birmingham, AL",    "Indianapolis, IN",  511,  7.5],
-            [9,  "I-25 Mountain",     "Albuquerque, NM",   "Denver, CO",        452,  6.5],
-            [10, "I-94 Northern",     "Chicago, IL",       "Detroit, MI",       281,  4.0]]},
-        {"name": "shipments", "columns": [
-            {"name": "Shipment ID",  "type": "INTEGER"},
-            {"name": "Vehicle ID",   "type": "INTEGER"},
-            {"name": "Driver ID",    "type": "INTEGER"},
-            {"name": "Route ID",     "type": "INTEGER"},
-            {"name": "Depart. Dt.",  "type": "DATE"},
-            {"name": "Arrival Dt.",  "type": "DATE"},
-            {"name": "Weight (lbs)", "type": "INTEGER"},
-            {"name": "STATUS",       "type": "TEXT"}],
-         "rows": [
-            [1,  1,  1,  3,  "2025-01-06", "2025-01-07", 28400, "Delivered"],
-            [2,  3,  7,  1,  "2025-01-07", "2025-01-08", 42100, "Delivered"],
-            [3,  5,  5,  5,  "2025-01-08", "2025-01-09", 31800, "In Transit"],
-            [4,  2,  3,  2,  "2025-01-09", "2025-01-10", 38900, "In Transit"],
-            [5,  7,  10, 10, "2025-01-10", "2025-01-10", 15200, "Delivered"],
-            [6,  4,  8,  6,  "2025-01-11", "2025-01-12", 44000, "Delayed"],
-            [7,  6,  2,  7,  "2025-01-12", "2025-01-13", 29600, "In Transit"],
-            [8,  8,  4,  8,  "2025-01-13", "2025-01-15", 41800, "In Transit"],
-            [9,  9,  9,  4,  "2025-01-14", "2025-01-16", 48000, "Pending"],
-            [10, 10, 6,  9,  "2025-01-15", "2025-01-16", 22700, "In Transit"]]}
-    ]},
-    "media": {"tables": [
-        {"name": "hotels", "columns": [
-            {"name": "Hotel ID",    "type": "INTEGER"},
-            {"name": "Hotel Name",  "type": "TEXT"},
-            {"name": "City",        "type": "TEXT"},
-            {"name": "Star Rating", "type": "INTEGER"},
-            {"name": "# of Rooms",  "type": "INTEGER"},
-            {"name": "Chain/Brand", "type": "TEXT"}],
-         "rows": [
-            [1,  "The Grand Meridian",       "New York, NY",    5, 420, "Meridian Collection"],
-            [2,  "Coastal Breeze Inn",        "Miami, FL",       4, 180, "Coastal Group"],
-            [3,  "Mountain View Lodge",       "Aspen, CO",       4,  95, "Independent"],
-            [4,  "City Lights Boutique",      "Chicago, IL",     3,  72, "Independent"],
-            [5,  "Pacific Palms Resort",      "Honolulu, HI",    5, 550, "Pacific Hotels"],
-            [6,  "Lone Star Suites",          "Austin, TX",      3, 140, "Lone Star Group"],
-            [7,  "Harbor View Hotel",         "Seattle, WA",     4, 230, "Northwest Stay"],
-            [8,  "Desert Dunes Resort",       "Scottsdale, AZ",  5, 360, "Luxury Desert Co."],
-            [9,  "Historic Elm House",        "New Orleans, LA", 4,  68, "Independent"],
-            [10, "Sunset Boulevard Inn",      "Los Angeles, CA", 3, 110, "Pacific Hotels"]]},
-        {"name": "rooms", "columns": [
-            {"name": "Room ID",       "type": "INTEGER"},
-            {"name": "Hotel ID",      "type": "INTEGER"},
-            {"name": "Room #",        "type": "TEXT"},
-            {"name": "Room Type",     "type": "TEXT"},
-            {"name": "Rate/Night ($)","type": "DECIMAL"},
-            {"name": "Available?",    "type": "BOOLEAN"}],
-         "rows": [
-            [1,  1,  "1201", "Suite",          850.00, True],
-            [2,  1,  "805",  "Deluxe King",    420.00, False],
-            [3,  2,  "302",  "Ocean View",     310.00, True],
-            [4,  3,  "101",  "Mountain Suite", 540.00, True],
-            [5,  4,  "210",  "Standard Queen", 145.00, True],
-            [6,  5,  "1502", "Ocean Suite",   1200.00, False],
-            [7,  6,  "312",  "King Room",      175.00, True],
-            [8,  7,  "408",  "Harbor View",    295.00, True],
-            [9,  8,  "701",  "Pool Suite",    1050.00, True],
-            [10, 9,  "105",  "Heritage Room",  220.00, True]]},
-        {"name": "guests", "columns": [
-            {"name": "Guest ID",    "type": "INTEGER"},
-            {"name": "First Name",  "type": "TEXT"},
-            {"name": "Last Name",   "type": "TEXT"},
-            {"name": "E-Mail",      "type": "TEXT"},
-            {"name": "Nationality", "type": "TEXT"},
-            {"name": "Loyalty Tier","type": "TEXT"}],
-         "rows": [
-            [1,  "Emma",      "Whitfield",     "e.whitfield@email.com",   "USA",          "Gold"],
-            [2,  "Hiroshi",   "Yamamoto",      "h.yamamoto@email.com",    "Japan",        "Platinum"],
-            [3,  "Camille",   "Beaumont",      "c.beaumont@email.com",    "France",       "Silver"],
-            [4,  "Andile",    "Dlamini",       "a.dlamini@email.com",     "South Africa", "Bronze"],
-            [5,  "Charlotte", "Hayes",         "c.hayes@email.com",       "UK",           "Gold"],
-            [6,  "Mohammed",  "Al-Farsi",      "m.alfarsi@email.com",     "UAE",          "Platinum"],
-            [7,  "Isabel",    "Cruz",          "i.cruz@email.com",        "Brazil",       "Silver"],
-            [8,  "Jonas",     "Weber",         "j.weber@email.com",       "Germany",      "Bronze"],
-            [9,  "Aiko",      "Nakamura",      "a.nakamura@email.com",    "Japan",        "Gold"],
-            [10, "Sophia",    "Papadopoulos",  "s.papadopoulos@email.com","Greece",       "Silver"]]},
-        {"name": "reservations", "columns": [
-            {"name": "Res. ID",          "type": "INTEGER"},
-            {"name": "Hotel ID",         "type": "INTEGER"},
-            {"name": "Room ID",          "type": "INTEGER"},
-            {"name": "Guest ID",         "type": "INTEGER"},
-            {"name": "Check-In Dt.",     "type": "DATE"},
-            {"name": "Check-Out Dt.",    "type": "DATE"},
-            {"name": "Total Charge ($)", "type": "DECIMAL"},
-            {"name": "STATUS",           "type": "TEXT"}],
-         "rows": [
-            [1,  1, 1,  2, "2025-01-10", "2025-01-14",  3400.00, "Completed"],
-            [2,  5, 6,  6, "2025-01-12", "2025-01-18",  7200.00, "Completed"],
-            [3,  3, 4,  1, "2025-01-15", "2025-01-18",  1620.00, "Completed"],
-            [4,  8, 9,  9, "2025-01-17", "2025-01-22",  5250.00, "Active"],
-            [5,  2, 3,  5, "2025-01-18", "2025-01-21",   930.00, "Active"],
-            [6,  7, 8,  3, "2025-01-19", "2025-01-23",  1180.00, "Active"],
-            [7,  4, 5,  7, "2025-01-20", "2025-01-22",   290.00, "Upcoming"],
-            [8,  1, 2,  4, "2025-01-22", "2025-01-25",  1260.00, "Upcoming"],
-            [9,  6, 7,  8, "2025-01-25", "2025-01-28",   525.00, "Upcoming"],
-            [10, 9, 10, 10,"2025-01-27", "2025-01-30",   660.00, "Upcoming"]]}
-    ]},
-    "agriculture": {"tables": [
-        {"name": "farms", "columns": [
-            {"name": "Farm ID",    "type": "INTEGER"},
-            {"name": "Farm Name",  "type": "TEXT"},
-            {"name": "STATE",      "type": "TEXT"},
-            {"name": "Acreage",    "type": "INTEGER"},
-            {"name": "Farm Type",  "type": "TEXT"},
-            {"name": "Owner Name", "type": "TEXT"}],
-         "rows": [
-            [1,  "Green Valley Farm",    "Iowa",        1200, "Grain",     "Robert Mueller"],
-            [2,  "Sunflower Acres",      "Kansas",       850, "Oilseed",   "Maria Santos"],
-            [3,  "Coastal Fresh Co.",    "California",   620, "Vegetable", "Chen Wei"],
-            [4,  "Heartland Dairy",      "Wisconsin",    440, "Dairy",     "Emily Larsson"],
-            [5,  "Prairie Wind Wheat",   "Nebraska",    2100, "Grain",     "Tom Okafor"],
-            [6,  "Rocky Ridge Ranch",    "Montana",     3800, "Livestock", "Diana Patel"],
-            [7,  "BlueSky Orchards",     "Washington",   380, "Fruit",     "James Kowalski"],
-            [8,  "Gulf Coast Citrus",    "Florida",      560, "Fruit",     "Rosa Hernandez"],
-            [9,  "Great Plains Corn",    "Illinois",    1650, "Grain",     "Amir Hassan"],
-            [10, "Delta Cotton Fields",  "Mississippi", 1100, "Fiber",     "Sandra Williams"]]},
-        {"name": "crops", "columns": [
-            {"name": "Crop ID",               "type": "INTEGER"},
-            {"name": "Farm ID",               "type": "INTEGER"},
-            {"name": "Crop Name",             "type": "TEXT"},
-            {"name": "Season",                "type": "TEXT"},
-            {"name": "Planting Dt.",          "type": "DATE"},
-            {"name": "Exp. Yield (tons)",     "type": "DECIMAL"}],
-         "rows": [
-            [1,  1,  "Soybeans",     "Summer", "2025-04-15", 3480.0],
-            [2,  1,  "Corn",         "Summer", "2025-04-20", 5520.0],
-            [3,  2,  "Sunflowers",   "Summer", "2025-05-01", 1360.0],
-            [4,  3,  "Tomatoes",     "Spring", "2025-03-10",  980.0],
-            [5,  3,  "Lettuce",      "Spring", "2025-02-20",  420.0],
-            [6,  5,  "Winter Wheat", "Winter", "2024-10-15", 8400.0],
-            [7,  7,  "Apples",       "Fall",   "2025-04-01",  560.0],
-            [8,  8,  "Oranges",      "Winter", "2024-11-15",  840.0],
-            [9,  9,  "Corn",         "Summer", "2025-04-18", 6600.0],
-            [10, 10, "Cotton",       "Summer", "2025-04-25", 2640.0]]},
-        {"name": "harvests", "columns": [
-            {"name": "Harvest ID",        "type": "INTEGER"},
-            {"name": "Crop ID",           "type": "INTEGER"},
-            {"name": "Harvest Dt.",       "type": "DATE"},
-            {"name": "Actual Yield (tons)","type": "DECIMAL"},
-            {"name": "Grade/Quality",     "type": "TEXT"},
-            {"name": "Revenue ($)",       "type": "DECIMAL"}],
-         "rows": [
-            [1,  1,  "2025-09-20",  3210.0, "Grade A",  1605000.0],
-            [2,  2,  "2025-09-25",  5180.0, "Grade A",  1295000.0],
-            [3,  3,  "2025-09-15",  1290.0, "Grade B",  1032000.0],
-            [4,  4,  "2025-07-10",   910.0, "Grade A",  1365000.0],
-            [5,  5,  "2025-05-15",   390.0, "Grade A",   780000.0],
-            [6,  6,  "2025-07-30",  7840.0, "Grade A",  2352000.0],
-            [7,  7,  "2025-10-05",   520.0, "Premium",  1040000.0],
-            [8,  8,  "2025-03-20",   810.0, "Grade A",   648000.0],
-            [9,  9,  "2025-09-22",  6240.0, "Grade A",  1560000.0],
-            [10, 10, "2025-10-15",  2400.0, "Grade B",  1680000.0]]},
-        {"name": "distributors", "columns": [
-            {"name": "Distributor ID",  "type": "INTEGER"},
-            {"name": "Company Name",    "type": "TEXT"},
-            {"name": "REGION",          "type": "TEXT"},
-            {"name": "Crop ID",         "type": "INTEGER"},
-            {"name": "Units Sold",      "type": "INTEGER"},
-            {"name": "Contract Dt.",    "type": "DATE"}],
-         "rows": [
-            [1,  "Midwest Grain Traders",    "Midwest",   1,  148000, "2025-03-01"],
-            [2,  "National Corn Exchange",   "National",  2,  212000, "2025-01-15"],
-            [3,  "SunGold Oilseeds LLC",     "Central",   3,   58000, "2025-02-20"],
-            [4,  "Pacific Fresh Markets",    "West",      4,   42000, "2025-03-15"],
-            [5,  "Organic Greens Co.",       "National",  5,   18000, "2025-01-10"],
-            [6,  "Great Plains Wheat Co.",   "National",  6,  380000, "2025-01-05"],
-            [7,  "Northwest Fruit Dist.",    "West",      7,   22000, "2025-04-01"],
-            [8,  "Sunshine Citrus Group",    "Southeast", 8,   34000, "2025-03-10"],
-            [9,  "Illinois Corn Exports",    "National",  9,  280000, "2025-02-01"],
-            [10, "Southern Cotton Mills",    "Southeast", 10,  96000, "2025-04-15"]]}
-    ]},
-}
-
-# ── Mock data — CLEAN column names (same rows, already-normalized names) ──────
-_MOCK_DATA_CLEAN: dict[str, dict] = {
-    "healthcare": {"tables": [
-        {"name": "doctors", "columns": [
-            {"name": "doctor_id",        "type": "INTEGER"},
-            {"name": "first_name",       "type": "TEXT"},
-            {"name": "last_name",        "type": "TEXT"},
-            {"name": "specialty",        "type": "TEXT"},
-            {"name": "years_experience", "type": "INTEGER"},
-            {"name": "email",            "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["healthcare"]["tables"][0]["rows"]},
-        {"name": "patients", "columns": [
-            {"name": "patient_id",        "type": "INTEGER"},
-            {"name": "first_name",        "type": "TEXT"},
-            {"name": "last_name",         "type": "TEXT"},
-            {"name": "date_of_birth",     "type": "DATE"},
-            {"name": "gender",            "type": "TEXT"},
-            {"name": "blood_type",        "type": "TEXT"},
-            {"name": "primary_doctor_id", "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["healthcare"]["tables"][1]["rows"]},
-        {"name": "appointments", "columns": [
-            {"name": "appointment_id",   "type": "INTEGER"},
-            {"name": "patient_id",       "type": "INTEGER"},
-            {"name": "doctor_id",        "type": "INTEGER"},
-            {"name": "appointment_date", "type": "DATE"},
-            {"name": "status",           "type": "TEXT"},
-            {"name": "chief_complaint",  "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["healthcare"]["tables"][2]["rows"]},
-        {"name": "prescriptions", "columns": [
-            {"name": "prescription_id",   "type": "INTEGER"},
-            {"name": "patient_id",        "type": "INTEGER"},
-            {"name": "doctor_id",         "type": "INTEGER"},
-            {"name": "medication",        "type": "TEXT"},
-            {"name": "dosage",            "type": "TEXT"},
-            {"name": "date_prescribed",   "type": "DATE"},
-            {"name": "refills_remaining", "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["healthcare"]["tables"][3]["rows"]},
-    ]},
-    "financial": {"tables": [
-        {"name": "customers", "columns": [
-            {"name": "customer_id",  "type": "INTEGER"},
-            {"name": "first_name",   "type": "TEXT"},
-            {"name": "last_name",    "type": "TEXT"},
-            {"name": "email",        "type": "TEXT"},
-            {"name": "credit_score", "type": "INTEGER"},
-            {"name": "member_since", "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["financial"]["tables"][0]["rows"]},
-        {"name": "products", "columns": [
-            {"name": "product_id",    "type": "INTEGER"},
-            {"name": "product_name",  "type": "TEXT"},
-            {"name": "category",      "type": "TEXT"},
-            {"name": "interest_rate", "type": "DECIMAL"},
-            {"name": "min_balance",   "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["financial"]["tables"][1]["rows"]},
-        {"name": "accounts", "columns": [
-            {"name": "account_id",  "type": "INTEGER"},
-            {"name": "customer_id", "type": "INTEGER"},
-            {"name": "product_id",  "type": "INTEGER"},
-            {"name": "balance",     "type": "DECIMAL"},
-            {"name": "currency",    "type": "TEXT"},
-            {"name": "date_opened", "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["financial"]["tables"][2]["rows"]},
-        {"name": "transactions", "columns": [
-            {"name": "transaction_id",   "type": "INTEGER"},
-            {"name": "account_id",       "type": "INTEGER"},
-            {"name": "transaction_date", "type": "DATE"},
-            {"name": "amount",           "type": "DECIMAL"},
-            {"name": "type",             "type": "TEXT"},
-            {"name": "description",      "type": "TEXT"},
-            {"name": "merchant",         "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["financial"]["tables"][3]["rows"]},
-    ]},
-    "technology": {"tables": [
-        {"name": "employees", "columns": [
-            {"name": "employee_id",      "type": "INTEGER"},
-            {"name": "first_name",       "type": "TEXT"},
-            {"name": "last_name",        "type": "TEXT"},
-            {"name": "job_title",        "type": "TEXT"},
-            {"name": "department",       "type": "TEXT"},
-            {"name": "years_experience", "type": "INTEGER"},
-            {"name": "email",            "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["technology"]["tables"][0]["rows"]},
-        {"name": "projects", "columns": [
-            {"name": "project_id",       "type": "INTEGER"},
-            {"name": "project_name",     "type": "TEXT"},
-            {"name": "lead_employee_id", "type": "INTEGER"},
-            {"name": "start_date",       "type": "DATE"},
-            {"name": "due_date",         "type": "DATE"},
-            {"name": "status",           "type": "TEXT"},
-            {"name": "budget",           "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["technology"]["tables"][1]["rows"]},
-        {"name": "bugs", "columns": [
-            {"name": "bug_id",        "type": "INTEGER"},
-            {"name": "project_id",    "type": "INTEGER"},
-            {"name": "reporter_id",   "type": "INTEGER"},
-            {"name": "title",         "type": "TEXT"},
-            {"name": "severity",      "type": "TEXT"},
-            {"name": "reported_date", "type": "DATE"},
-            {"name": "status",        "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["technology"]["tables"][2]["rows"]},
-        {"name": "deployments", "columns": [
-            {"name": "deployment_id", "type": "INTEGER"},
-            {"name": "project_id",    "type": "INTEGER"},
-            {"name": "deploy_date",   "type": "DATE"},
-            {"name": "environment",   "type": "TEXT"},
-            {"name": "version",       "type": "TEXT"},
-            {"name": "deployed_by",   "type": "INTEGER"},
-            {"name": "success",       "type": "BOOLEAN"}],
-         "rows": _MOCK_DATA_MESSY["technology"]["tables"][3]["rows"]},
-    ]},
-    "retail": {"tables": [
-        {"name": "products", "columns": [
-            {"name": "product_id",      "type": "INTEGER"},
-            {"name": "product_name",    "type": "TEXT"},
-            {"name": "category",        "type": "TEXT"},
-            {"name": "unit_price",      "type": "DECIMAL"},
-            {"name": "stock_quantity",  "type": "INTEGER"},
-            {"name": "sku",             "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["retail"]["tables"][0]["rows"]},
-        {"name": "customers", "columns": [
-            {"name": "customer_id",  "type": "INTEGER"},
-            {"name": "first_name",   "type": "TEXT"},
-            {"name": "last_name",    "type": "TEXT"},
-            {"name": "email",        "type": "TEXT"},
-            {"name": "member_tier",  "type": "TEXT"},
-            {"name": "join_date",    "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["retail"]["tables"][1]["rows"]},
-        {"name": "orders", "columns": [
-            {"name": "order_id",         "type": "INTEGER"},
-            {"name": "customer_id",      "type": "INTEGER"},
-            {"name": "order_date",       "type": "DATE"},
-            {"name": "total",            "type": "DECIMAL"},
-            {"name": "status",           "type": "TEXT"},
-            {"name": "shipping_method",  "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["retail"]["tables"][2]["rows"]},
-        {"name": "order_items", "columns": [
-            {"name": "item_id",       "type": "INTEGER"},
-            {"name": "order_id",      "type": "INTEGER"},
-            {"name": "product_id",    "type": "INTEGER"},
-            {"name": "quantity",      "type": "INTEGER"},
-            {"name": "unit_price",    "type": "DECIMAL"},
-            {"name": "discount_pct",  "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["retail"]["tables"][3]["rows"]},
-    ]},
-    "manufacturing": {"tables": [
-        {"name": "facilities", "columns": [
-            {"name": "facility_id",    "type": "INTEGER"},
-            {"name": "facility_name",  "type": "TEXT"},
-            {"name": "location",       "type": "TEXT"},
-            {"name": "daily_capacity", "type": "INTEGER"},
-            {"name": "year_built",     "type": "INTEGER"},
-            {"name": "is_active",      "type": "BOOLEAN"}],
-         "rows": _MOCK_DATA_MESSY["manufacturing"]["tables"][0]["rows"]},
-        {"name": "equipment", "columns": [
-            {"name": "equipment_id",           "type": "INTEGER"},
-            {"name": "facility_id",            "type": "INTEGER"},
-            {"name": "equipment_name",         "type": "TEXT"},
-            {"name": "manufacturer",           "type": "TEXT"},
-            {"name": "manufacture_year",       "type": "INTEGER"},
-            {"name": "last_maintenance_date",  "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["manufacturing"]["tables"][1]["rows"]},
-        {"name": "production_runs", "columns": [
-            {"name": "run_id",         "type": "INTEGER"},
-            {"name": "facility_id",    "type": "INTEGER"},
-            {"name": "product_line",   "type": "TEXT"},
-            {"name": "start_date",     "type": "DATE"},
-            {"name": "end_date",       "type": "DATE"},
-            {"name": "units_produced", "type": "INTEGER"},
-            {"name": "shift",          "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["manufacturing"]["tables"][2]["rows"]},
-        {"name": "quality_checks", "columns": [
-            {"name": "check_id",       "type": "INTEGER"},
-            {"name": "run_id",         "type": "INTEGER"},
-            {"name": "equipment_id",   "type": "INTEGER"},
-            {"name": "defect_rate_pct","type": "DECIMAL"},
-            {"name": "check_date",     "type": "DATE"},
-            {"name": "result",         "type": "TEXT"},
-            {"name": "inspector_id",   "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["manufacturing"]["tables"][3]["rows"]},
-    ]},
-    "energy": {"tables": [
-        {"name": "plants", "columns": [
-            {"name": "plant_id",    "type": "INTEGER"},
-            {"name": "plant_name",  "type": "TEXT"},
-            {"name": "energy_type", "type": "TEXT"},
-            {"name": "capacity_mw", "type": "DECIMAL"},
-            {"name": "online_date", "type": "DATE"},
-            {"name": "state",       "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["energy"]["tables"][0]["rows"]},
-        {"name": "meters", "columns": [
-            {"name": "meter_id",          "type": "INTEGER"},
-            {"name": "plant_id",          "type": "INTEGER"},
-            {"name": "meter_type",        "type": "TEXT"},
-            {"name": "install_date",      "type": "DATE"},
-            {"name": "last_reading_kwh",  "type": "DECIMAL"},
-            {"name": "status",            "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["energy"]["tables"][1]["rows"]},
-        {"name": "consumption_records", "columns": [
-            {"name": "record_id",       "type": "INTEGER"},
-            {"name": "meter_id",        "type": "INTEGER"},
-            {"name": "record_date",     "type": "DATE"},
-            {"name": "kwh_consumed",    "type": "DECIMAL"},
-            {"name": "peak_demand_kw",  "type": "DECIMAL"},
-            {"name": "cost_per_kwh",    "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["energy"]["tables"][2]["rows"]},
-        {"name": "maintenance_logs", "columns": [
-            {"name": "log_id",            "type": "INTEGER"},
-            {"name": "plant_id",          "type": "INTEGER"},
-            {"name": "maintenance_type",  "type": "TEXT"},
-            {"name": "scheduled_date",    "type": "DATE"},
-            {"name": "completed_date",    "type": "DATE"},
-            {"name": "cost",              "type": "DECIMAL"},
-            {"name": "technician_id",     "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["energy"]["tables"][3]["rows"]},
-    ]},
-    "construction": {"tables": [
-        {"name": "properties", "columns": [
-            {"name": "property_id", "type": "INTEGER"},
-            {"name": "address",     "type": "TEXT"},
-            {"name": "city",        "type": "TEXT"},
-            {"name": "bedrooms",    "type": "INTEGER"},
-            {"name": "bathrooms",   "type": "DECIMAL"},
-            {"name": "sq_ft",       "type": "INTEGER"},
-            {"name": "year_built",  "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["construction"]["tables"][0]["rows"]},
-        {"name": "agents", "columns": [
-            {"name": "agent_id",       "type": "INTEGER"},
-            {"name": "first_name",     "type": "TEXT"},
-            {"name": "last_name",      "type": "TEXT"},
-            {"name": "license_number", "type": "TEXT"},
-            {"name": "agency",         "type": "TEXT"},
-            {"name": "years_active",   "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["construction"]["tables"][1]["rows"]},
-        {"name": "listings", "columns": [
-            {"name": "listing_id",     "type": "INTEGER"},
-            {"name": "property_id",    "type": "INTEGER"},
-            {"name": "agent_id",       "type": "INTEGER"},
-            {"name": "list_price",     "type": "DECIMAL"},
-            {"name": "list_date",      "type": "DATE"},
-            {"name": "status",         "type": "TEXT"},
-            {"name": "days_on_market", "type": "INTEGER"}],
-         "rows": _MOCK_DATA_MESSY["construction"]["tables"][2]["rows"]},
-        {"name": "transactions", "columns": [
-            {"name": "transaction_id",   "type": "INTEGER"},
-            {"name": "listing_id",       "type": "INTEGER"},
-            {"name": "sale_price",       "type": "DECIMAL"},
-            {"name": "close_date",       "type": "DATE"},
-            {"name": "buyer_agent_id",   "type": "INTEGER"},
-            {"name": "commission_pct",   "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["construction"]["tables"][3]["rows"]},
-    ]},
-    "transportation": {"tables": [
-        {"name": "vehicles", "columns": [
-            {"name": "vehicle_id",        "type": "INTEGER"},
-            {"name": "make_model",        "type": "TEXT"},
-            {"name": "license_plate",     "type": "TEXT"},
-            {"name": "capacity_lbs",      "type": "INTEGER"},
-            {"name": "year",              "type": "INTEGER"},
-            {"name": "last_service_date", "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["transportation"]["tables"][0]["rows"]},
-        {"name": "drivers", "columns": [
-            {"name": "driver_id",   "type": "INTEGER"},
-            {"name": "first_name",  "type": "TEXT"},
-            {"name": "last_name",   "type": "TEXT"},
-            {"name": "cdl_number",  "type": "TEXT"},
-            {"name": "hire_date",   "type": "DATE"},
-            {"name": "rating",      "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["transportation"]["tables"][1]["rows"]},
-        {"name": "routes", "columns": [
-            {"name": "route_id",          "type": "INTEGER"},
-            {"name": "route_name",        "type": "TEXT"},
-            {"name": "origin_city",       "type": "TEXT"},
-            {"name": "destination_city",  "type": "TEXT"},
-            {"name": "distance_miles",    "type": "INTEGER"},
-            {"name": "estimated_hours",   "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["transportation"]["tables"][2]["rows"]},
-        {"name": "shipments", "columns": [
-            {"name": "shipment_id",  "type": "INTEGER"},
-            {"name": "vehicle_id",   "type": "INTEGER"},
-            {"name": "driver_id",    "type": "INTEGER"},
-            {"name": "route_id",     "type": "INTEGER"},
-            {"name": "depart_date",  "type": "DATE"},
-            {"name": "arrival_date", "type": "DATE"},
-            {"name": "weight_lbs",   "type": "INTEGER"},
-            {"name": "status",       "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["transportation"]["tables"][3]["rows"]},
-    ]},
-    "media": {"tables": [
-        {"name": "hotels", "columns": [
-            {"name": "hotel_id",     "type": "INTEGER"},
-            {"name": "hotel_name",   "type": "TEXT"},
-            {"name": "city",         "type": "TEXT"},
-            {"name": "star_rating",  "type": "INTEGER"},
-            {"name": "total_rooms",  "type": "INTEGER"},
-            {"name": "brand",        "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["media"]["tables"][0]["rows"]},
-        {"name": "rooms", "columns": [
-            {"name": "room_id",        "type": "INTEGER"},
-            {"name": "hotel_id",       "type": "INTEGER"},
-            {"name": "room_number",    "type": "TEXT"},
-            {"name": "room_type",      "type": "TEXT"},
-            {"name": "rate_per_night", "type": "DECIMAL"},
-            {"name": "is_available",   "type": "BOOLEAN"}],
-         "rows": _MOCK_DATA_MESSY["media"]["tables"][1]["rows"]},
-        {"name": "guests", "columns": [
-            {"name": "guest_id",     "type": "INTEGER"},
-            {"name": "first_name",   "type": "TEXT"},
-            {"name": "last_name",    "type": "TEXT"},
-            {"name": "email",        "type": "TEXT"},
-            {"name": "nationality",  "type": "TEXT"},
-            {"name": "loyalty_tier", "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["media"]["tables"][2]["rows"]},
-        {"name": "reservations", "columns": [
-            {"name": "reservation_id", "type": "INTEGER"},
-            {"name": "hotel_id",       "type": "INTEGER"},
-            {"name": "room_id",        "type": "INTEGER"},
-            {"name": "guest_id",       "type": "INTEGER"},
-            {"name": "check_in_date",  "type": "DATE"},
-            {"name": "check_out_date", "type": "DATE"},
-            {"name": "total_charge",   "type": "DECIMAL"},
-            {"name": "status",         "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["media"]["tables"][3]["rows"]},
-    ]},
-    "agriculture": {"tables": [
-        {"name": "farms", "columns": [
-            {"name": "farm_id",    "type": "INTEGER"},
-            {"name": "farm_name",  "type": "TEXT"},
-            {"name": "state",      "type": "TEXT"},
-            {"name": "acreage",    "type": "INTEGER"},
-            {"name": "farm_type",  "type": "TEXT"},
-            {"name": "owner_name", "type": "TEXT"}],
-         "rows": _MOCK_DATA_MESSY["agriculture"]["tables"][0]["rows"]},
-        {"name": "crops", "columns": [
-            {"name": "crop_id",              "type": "INTEGER"},
-            {"name": "farm_id",              "type": "INTEGER"},
-            {"name": "crop_name",            "type": "TEXT"},
-            {"name": "season",               "type": "TEXT"},
-            {"name": "planting_date",        "type": "DATE"},
-            {"name": "expected_yield_tons",  "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["agriculture"]["tables"][1]["rows"]},
-        {"name": "harvests", "columns": [
-            {"name": "harvest_id",        "type": "INTEGER"},
-            {"name": "crop_id",           "type": "INTEGER"},
-            {"name": "harvest_date",      "type": "DATE"},
-            {"name": "actual_yield_tons", "type": "DECIMAL"},
-            {"name": "grade",             "type": "TEXT"},
-            {"name": "revenue",           "type": "DECIMAL"}],
-         "rows": _MOCK_DATA_MESSY["agriculture"]["tables"][2]["rows"]},
-        {"name": "distributors", "columns": [
-            {"name": "distributor_id", "type": "INTEGER"},
-            {"name": "company_name",   "type": "TEXT"},
-            {"name": "region",         "type": "TEXT"},
-            {"name": "crop_id",        "type": "INTEGER"},
-            {"name": "units_sold",     "type": "INTEGER"},
-            {"name": "contract_date",  "type": "DATE"}],
-         "rows": _MOCK_DATA_MESSY["agriculture"]["tables"][3]["rows"]},
-    ]},
-}
-
-# ── Mock summaries ────────────────────────────────────────────────────────────
-_MOCK_SUMMARIES: dict[str, str] = {
-    "financial": (
-        "This financial services database connects 10 customers and 10 insurance/banking products "
-        "across 10 accounts and 10 January 2025 transactions, capturing a mixed-risk portfolio "
-        "with credit scores ranging from 590 to 820. The top three customers collectively hold "
-        "over $260,000 in savings and money market balances, making them high-value retention "
-        "targets. Debit transactions dominate the log, with rent and wire transfers as the largest "
-        "single outflows. Product diversity across checking, savings, credit cards, and loans "
-        "indicates strong cross-sell analytics opportunities for the insurance and banking lines."
-    ),
-    "energy": (
-        "This energy & oil and gas portfolio covers 10 generation plants across 9 states with "
-        "3,965 MW of combined nameplate capacity spanning solar, wind, hydro, gas, nuclear, coal, "
-        "biomass, and geothermal sources. Nuclear and coal plants drive the bulk of generation "
-        "volume but carry the highest maintenance costs -- $85,000 and $15,000 respectively for "
-        "January 2025. Five of the ten active meters show cost-per-kWh below $0.05, indicating "
-        "strong efficiency for renewable assets. The two oldest facilities (nuclear: 1988, coal: "
-        "1995) should be flagged as priority items in the capital replacement roadmap."
-    ),
-    "healthcare": (
-        "This healthcare & pharmaceuticals database spans 4 relational tables -- doctors, patients, "
-        "appointments, and prescriptions -- covering 10 physicians across 8 specialties and 10 "
-        "patient records. Appointments in January 2025 show a 70% completion rate with two still "
-        "scheduled and one cancelled, pointing to manageable cancellation risk. Cardiology carries "
-        "the highest patient-to-doctor ratio, suggesting additional capacity planning is warranted. "
-        "With 10 active prescriptions across 8 unique medications, the pharmacology data is rich "
-        "enough to support drug utilization and refill-adherence analytics."
-    ),
-    "technology": (
-        "This technology/IT database connects 10 employees across 5 teams, 10 projects, 10 reported "
-        "bugs, and 10 deployment events. The project portfolio carries $1.525M in total budget, "
-        "led by the AIDA Platform v2 at $420K. Two critical bugs remain open -- one in the ETL "
-        "pipeline and one causing session token failures -- representing pipeline risk for the two "
-        "highest-budget active projects. With a 90% deployment success rate and one failed "
-        "production push, the team's release cadence is strong but warrants a post-mortem on "
-        "the security hardening rollback."
-    ),
-    "construction": (
-        "This construction & real estate database connects 10 residential properties across 8 cities, "
-        "10 licensed agents, 10 listings, and 10 closed transactions from January 2025. Sold "
-        "listings cleared at an average of 98.6% of list price, indicating a strong seller's market. "
-        "The Scottsdale luxury listing at $1.895M was the highest-value transaction, closing $45,000 "
-        "under ask. Days on market average 16 days across active listings, with the oldest at 34 "
-        "days -- a prime candidate for a price-adjustment strategy. Agent coverage is one-to-one "
-        "per listing, suggesting a boutique brokerage or contractor referral model."
-    ),
-    "agriculture": (
-        "This agriculture & food production database covers 10 farms across 9 US states, 10 crop "
-        "varieties, 10 harvest records, and 10 distributor contracts for the 2024-2025 growing "
-        "season. Total expected yield across all crops exceeds 30,000 tons, with grain crops "
-        "(corn, wheat, soybeans) dominating at 75% of volume. Harvest revenue across completed "
-        "records tops $13.9M, led by the Prairie Wind Wheat harvest at $2.35M. Three farms "
-        "operate above 1,500 acres -- Great Plains Corn, Rocky Ridge Ranch, and Prairie Wind "
-        "Wheat -- making them prime candidates for precision agriculture investment to maximize "
-        "yield-per-acre efficiency."
-    ),
-    "manufacturing": (
-        "This manufacturing database spans 10 facilities across 9 US states, 10 equipment records, "
-        "10 production runs, and 10 quality inspections from January 2025. Total output reached "
-        "over 142,000 units across active facilities, led by the Gulf Coast Plant's plastic "
-        "extrusion line at 45,000 units. Two quality checks failed with defect rates above 2% -- "
-        "concentrated in consumer electronics housing and heavy machinery frames -- warranting "
-        "immediate root-cause analysis. Eastbrook Hub remains offline, reducing available network "
-        "capacity by 1,500 units per day."
-    ),
-    "retail": (
-        "This retail & e-commerce database captures 10 products across 5 categories, 10 customers "
-        "segmented by loyalty tier, 10 orders, and 10 line items from January 2025. Platinum-tier "
-        "customers account for 3 of the top 4 orders by value, making this segment critical for "
-        "retention. Electronics commands the highest average unit price at $69.99, while Kitchen "
-        "holds the broadest inventory depth across 3 SKUs. Two orders remain in Processing status, "
-        "signaling a fulfillment optimization opportunity for standard shipping customers."
-    ),
-    "transportation": (
-        "This transportation & logistics database tracks 10 heavy freight vehicles, 10 CDL drivers, "
-        "10 interstate routes, and 10 January 2025 shipments. Combined payload across active "
-        "shipments exceeds 370,000 lbs, with 3 delivered, 5 in transit, 1 delayed, and 1 pending. "
-        "The I-80 cross-country route (SF to Newark, 2,899 miles) carries the longest ETA at 42 "
-        "hours and the heaviest vehicle utilization. Driver ratings average 4.61 out of 5.0, with "
-        "two drivers above 4.8 -- strong candidates for a performance-based retention incentive. "
-        "The delayed I-40 shipment should trigger an immediate ETA escalation."
-    ),
-    "media": (
-        "This media, entertainment & tourism database covers 10 hotel and resort properties across "
-        "9 US cities, 10 room types priced between $145 and $1,200 per night, 10 international "
-        "guests, and 10 reservations spanning January 2025. Platinum loyalty guests generate the "
-        "top two reservations by revenue ($7,200 and $3,400), confirming the outsized revenue "
-        "contribution of the top loyalty tier. The Pacific Palms Resort and Grand Meridian anchor "
-        "the portfolio's luxury segment, while 3-star properties serve as volume drivers. Two "
-        "premium rooms are currently unavailable, representing up to $2,050 in lost nightly "
-        "revenue -- a direct content and guest-experience recovery opportunity."
-    ),
-}
 
 # ── PostgreSQL write ──────────────────────────────────────────────────────────
 _PG_TYPE_MAP = {"TEXT": "TEXT", "INTEGER": "INTEGER", "DECIMAL": "NUMERIC",
@@ -2816,7 +1655,8 @@ class GenerateRequest(BaseModel):
 
 @app.get("/api/config")
 def api_config():
-    return {"models": MODELS, "industries": INDUSTRIES, "file_formats": FILE_FORMATS}
+    return {"models": MODELS, "industries": INDUSTRIES, "industry_tree": INDUSTRY_TREE,
+            "file_formats": FILE_FORMATS}
 
 
 @app.post("/api/generate")
@@ -2840,7 +1680,7 @@ def api_generate(req: GenerateRequest):
         schema, schema_t, previews, col_renames = snapshot_to_duckdb(req.industry)
         summary                                 = generate_summary(schema_t, req.model, req.industry,
                                                                    co_name, co_ctx)
-        sources = _MOCK_SOURCES.get(req.industry, {})
+        sources = _mock_sources(req.industry)
         _result_cache[req.industry] = {
             "summary":      summary,
             "schema_text":  schema_t,
@@ -2939,7 +1779,7 @@ async def api_generate_and_scale(req: GenerateScaleRequest):
             "tables":         previews,
             "summary":        "",
             "column_renames": col_renames,
-            "sources":        _MOCK_SOURCES.get(req.industry, {}),
+            "sources":        _mock_sources(req.industry),
             "num_rows":       scale_rows,
             "num_cols":       req.num_cols,
             "custom_columns": req.custom_columns,
@@ -3070,7 +1910,7 @@ async def api_upload_and_scale(
     files: list[UploadFile] = File(...),
     scale_rows: int = Form(1000),
     epochs: int = Form(100),
-    industry: str = Form("retail"),
+    industry: str = Form("misc_retail"),
     company_name: str = Form(""),
     company_context: str = Form(""),
     model: str = Form("gpt-4o"),
@@ -3167,6 +2007,522 @@ async def api_upload_and_scale(
         )
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+# ── Data masking ──────────────────────────────────────────────────────────────
+def _read_upload_to_df(filename: str, content: bytes) -> tuple[str, "pd.DataFrame"]:
+    """Read an uploaded file into a DataFrame, preserving its original column names.
+
+    Returns (sanitized_table_stem, dataframe). Raises HTTPException on bad input.
+    """
+    fname = filename or "table"
+    stem  = re.sub(r"[^a-zA-Z0-9_]", "_", pathlib.Path(fname).stem) or "table"
+    ext   = fname.rsplit(".", 1)[-1].lower() if "." in fname else "csv"
+    try:
+        if ext == "csv":
+            df = pd.read_csv(io.BytesIO(content))
+        elif ext in ("xlsx", "xls"):
+            df = pd.read_excel(io.BytesIO(content))
+        elif ext == "json":
+            df = pd.read_json(io.BytesIO(content))
+        elif ext == "parquet":
+            df = pd.read_parquet(io.BytesIO(content))
+        else:
+            raise HTTPException(
+                400, f"Unsupported file type '.{ext}'. Accepted: CSV, XLSX, JSON, Parquet"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"Could not read '{fname}': {exc}")
+    return stem, df
+
+
+# ── Realistic value pools for masking ──────────────────────────────────────────
+# These are deliberately large so that distinct original values map to distinct,
+# realistic replacements instead of recycling a handful of names.
+_MASK_FIRST = [
+    "James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda",
+    "David", "Elizabeth", "William", "Barbara", "Richard", "Susan", "Joseph", "Jessica",
+    "Thomas", "Sarah", "Christopher", "Karen", "Daniel", "Nancy", "Matthew", "Lisa",
+    "Anthony", "Margaret", "Mark", "Sandra", "Donald", "Ashley", "Steven", "Kimberly",
+    "Paul", "Emily", "Andrew", "Donna", "Joshua", "Michelle", "Kenneth", "Carol",
+    "Kevin", "Amanda", "Brian", "Dorothy", "George", "Melissa", "Edward", "Deborah",
+    "Aisha", "Diego", "Mei", "Omar", "Priya", "Hiroshi", "Fatima", "Lars",
+    "Yuki", "Kwame", "Ingrid", "Mateo", "Nadia", "Soren", "Leila", "Tariq",
+]
+_MASK_LAST = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+    "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas",
+    "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
+    "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker", "Young",
+    "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
+    "Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell",
+    "Patel", "Kim", "Okafor", "Rossi", "Svensson", "Mueller", "Diallo", "Nakamura",
+    "Petrov", "Haddad", "Bauer", "Costa", "Larsen", "Mwangi", "Reyes", "Foster",
+]
+_MASK_CITIES = [
+    "New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX", "Phoenix, AZ",
+    "Philadelphia, PA", "San Antonio, TX", "San Diego, CA", "Dallas, TX", "San Jose, CA",
+    "Austin, TX", "Jacksonville, FL", "Columbus, OH", "Charlotte, NC", "Indianapolis, IN",
+    "Seattle, WA", "Denver, CO", "Boston, MA", "Nashville, TN", "Portland, OR",
+    "Las Vegas, NV", "Detroit, MI", "Memphis, TN", "Louisville, KY", "Milwaukee, WI",
+    "Albuquerque, NM", "Tucson, AZ", "Sacramento, CA", "Kansas City, MO", "Atlanta, GA",
+    "Omaha, NE", "Raleigh, NC", "Minneapolis, MN", "Tampa, FL", "Pittsburgh, PA",
+]
+_MASK_STREETS = [
+    "Main St", "Oak Ave", "Maple Dr", "Cedar Ln", "Pine Rd", "Elm St", "Washington Ave",
+    "Lake View Dr", "Park Blvd", "Sunset Ave", "Hillcrest Rd", "Riverside Dr", "Birch Ln",
+    "Willow Way", "Highland Ave", "Meadow Ln", "Spruce St", "Chestnut St", "Walnut Ave",
+    "Lincoln Blvd", "Jefferson St", "Madison Ave", "Franklin Rd", "Adams St", "Church St",
+]
+_MASK_DOMAINS = ["example.com", "mail.com", "inbox.net", "webmail.org", "email.co", "post.io"]
+_MASK_COMPANY_A = [
+    "Summit", "Pioneer", "Vertex", "Horizon", "Atlas", "Beacon", "Cascade", "Catalyst",
+    "Evergreen", "Granite", "Ironwood", "Meridian", "Northstar", "Pinnacle", "Redwood",
+    "Sterling", "Trident", "Vanguard", "Apex", "Crestline", "Highpoint", "Lakeside",
+]
+_MASK_COMPANY_B = ["Inc.", "LLC", "Group", "Corp.", "Partners", "Holdings",
+                   "Systems", "Solutions", "Industries", "Co.", "Labs", "Logistics"]
+_MASK_JOB_LEVEL = ["Junior", "Senior", "Lead", "Principal", "Staff", "Associate",
+                   "Chief", "Head of", "Regional", "Assistant"]
+_MASK_JOB_ROLE = [
+    "Engineer", "Analyst", "Manager", "Coordinator", "Specialist", "Consultant",
+    "Director", "Administrator", "Designer", "Technician", "Accountant", "Strategist",
+    "Developer", "Architect", "Supervisor", "Officer", "Advisor", "Planner",
+]
+_MASK_DEPTS = [
+    "Engineering", "Sales", "Marketing", "Finance", "Human Resources", "Operations",
+    "Customer Support", "Legal", "Product", "Research", "Procurement", "Quality Assurance",
+    "Logistics", "IT", "Compliance", "Facilities", "Data", "Security",
+]
+_MASK_COUNTRIES = [
+    "United States", "Canada", "United Kingdom", "Germany", "France", "Australia",
+    "Japan", "Brazil", "India", "Mexico", "Spain", "Italy", "Netherlands", "Sweden",
+    "Singapore", "South Korea", "Ireland", "Norway", "Portugal", "New Zealand",
+]
+_MASK_STATES = [
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN",
+    "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV",
+    "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN",
+    "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+]
+_MASK_GENDERS = ["Female", "Male", "Non-binary", "Prefer not to say"]
+_MASK_BLOOD = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
+_MASK_MARITAL = ["Single", "Married", "Divorced", "Widowed", "Separated"]
+_MASK_GENERIC = [
+    "Crimson", "Cobalt", "Amber", "Slate", "Verdant", "Onyx", "Ivory", "Scarlet",
+    "Indigo", "Sienna", "Teal", "Maroon", "Cyan", "Magenta", "Olive", "Coral",
+]
+_MASK_AREA_CODES = [212, 310, 415, 312, 713, 602, 215, 619, 214, 408, 512, 305,
+                    206, 303, 617, 615, 503, 702, 313, 901]
+
+
+def _mask_salt(col_key: str) -> int:
+    """A stable per-column offset so two same-typed columns don't generate the
+    same sequence of fake values. Deterministic (no process-random hashing)."""
+    return sum((i + 1) * ord(c) for i, c in enumerate(col_key)) % 1009
+
+
+def _mask_fake_value(col: str, idx: int, salt: int):
+    """Generate a realistic, column-appropriate fake value.
+
+    `idx` is the 0-based ordinal of a *distinct* original value within the column,
+    so consecutive distinct inputs walk through the pools and rarely repeat. `salt`
+    offsets the walk per column. Detection mirrors how the column is named so the
+    output fits the field (a "city" gets a city, an "age" gets an age, etc.).
+    """
+    n    = clean_column_name(col)
+    toks = set(n.split("_"))
+
+    def tok(*words):
+        return any(w in toks for w in words)
+
+    k = idx + salt
+    F, L = len(_MASK_FIRST), len(_MASK_LAST)
+    # Vary BOTH the first and last name every step while keeping (first, last)
+    # pairs unique across the first F*L distinct values — avoids long runs that
+    # share a surname (e.g. "...Hernandez, ...Hernandez").
+    _a    = k % F
+    first = _MASK_FIRST[_a]
+    last  = _MASK_LAST[((k // F) + _a) % L]
+
+    DATE_TOKS = {"date", "dt", "dob", "birth", "birthday", "born", "since", "opened",
+                 "created", "hired", "joined", "start", "end", "expiry", "expiration",
+                 "issued", "timestamp"}
+
+    # ── Sensitive identifiers ────────────────────────────────────────────────────
+    if tok("ssn") or (tok("social") and tok("security")) or tok("nino", "tin"):
+        return f"{100 + k % 800:03d}-{10 + (idx * 7) % 89:02d}-{1000 + (idx * 37 + salt) % 8999:04d}"
+    if (tok("card", "creditcard", "cc", "pan") and not tok("loyalty", "gift", "scorecard", "report")):
+        return f"**** **** **** {1000 + (idx * 37 + salt) % 9000:04d}"
+    if tok("account", "acct", "iban") and (tok("number", "no", "num", "id") or n in ("account", "acct")):
+        return f"{10000000 + (idx * 97 + salt) % 89999999:08d}"
+    if tok("passport"):
+        return f"{chr(65 + salt % 26)}{10000000 + (idx * 53 + salt) % 89999999:08d}"
+    if tok("license", "licence", "dl"):
+        return f"{chr(65 + (idx + salt) % 26)}{1000000 + (idx * 41 + salt) % 8999999:07d}"
+    if tok("username", "user", "login", "handle") and not tok("id"):
+        return f"{first.lower()}.{last.lower()}{(idx + salt) % 90 + 10}"
+    if tok("ip", "ipaddress") or n == "ip_address":
+        return f"{10 + salt % 245}.{(idx * 7) % 256}.{(idx * 13 + salt) % 256}.{(idx * 29) % 254 + 1}"
+
+    # ── Identifier columns kept numeric (preserve join semantics) ────────────────
+    if n == "id" or n.endswith("_id") or n in ("uuid", "guid"):
+        return int(10001 + idx)
+    if tok("number", "num", "no", "code", "ref", "sku", "barcode", "upc", "po", "invoice") \
+            and not tok("phone", "mobile", "tel", "fax", "cell"):
+        prefix = "".join(w[0] for w in n.split("_") if w)[:3].upper() or "REF"
+        return f"{prefix}-{100000 + (idx * 7 + salt) % 899999:06d}"
+
+    # ── Contact ──────────────────────────────────────────────────────────────────
+    if tok("email", "mail", "e_mail"):
+        suffix = "" if k < F * L else str(k)
+        return f"{first.lower()}.{last.lower()}{suffix}@{_MASK_DOMAINS[salt % len(_MASK_DOMAINS)]}"
+    if tok("phone", "mobile", "tel", "telephone", "cell", "fax"):
+        area = _MASK_AREA_CODES[(idx + salt) % len(_MASK_AREA_CODES)]
+        return f"({area}) {200 + (idx * 7 + salt) % 800:03d}-{(idx * 37 + salt) % 10000:04d}"
+
+    # ── Dates / birth dates ───────────────────────────────────────────────────────
+    if (toks & DATE_TOKS) or n.endswith("_at") or n.endswith("_dt"):
+        if tok("dob", "birth", "birthday", "born"):
+            age   = 18 + (idx * 13 + salt) % 62
+            year  = 2025 - age
+        elif tok("since", "opened", "created", "hired", "joined", "start"):
+            year  = 2005 + (idx + salt) % 20
+        else:
+            year  = 2022 + (idx + salt) % 4
+        month = 1 + (idx * 5 + salt) % 12
+        day   = 1 + (idx * 11 + salt) % 28
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    # ── Person names ──────────────────────────────────────────────────────────────
+    if n in ("first_name", "firstname", "fname", "given_name") or (tok("first", "given") and tok("name")):
+        return first
+    if n in ("last_name", "lastname", "surname", "lname", "family_name") or \
+            (tok("last", "family", "sur") and tok("name")):
+        return last
+    if tok("middle") and tok("name", "initial"):
+        return _MASK_FIRST[(_a + F // 2) % F]
+
+    # ── Demographics ──────────────────────────────────────────────────────────────
+    if tok("age") and not (toks & DATE_TOKS):
+        return int(18 + (idx * 13 + salt) % 62)
+    if tok("experience", "exp", "yoe", "tenure", "seniority") or \
+            (tok("yrs", "years", "yr") and not (toks & DATE_TOKS)):
+        return int(1 + (idx * 5 + salt) % 35)
+    if tok("gender", "sex"):
+        return _MASK_GENDERS[(idx + salt) % len(_MASK_GENDERS)]
+    if tok("blood") and tok("type", "group"):
+        return _MASK_BLOOD[(idx + salt) % len(_MASK_BLOOD)]
+    if tok("marital", "marriage"):
+        return _MASK_MARITAL[(idx + salt) % len(_MASK_MARITAL)]
+
+    # ── Locations ──────────────────────────────────────────────────────────────────
+    if tok("address", "street", "addr") or n.endswith("_address"):
+        return f"{100 + (idx * 7 + salt) % 9800} {_MASK_STREETS[(idx + salt) % len(_MASK_STREETS)]}"
+    if n == "city" or n.endswith("_city") or tok("city", "town"):
+        return _MASK_CITIES[(idx + salt) % len(_MASK_CITIES)].split(",")[0]
+    if tok("state", "province") and not tok("status", "statement", "estate"):
+        return _MASK_STATES[(idx + salt) % len(_MASK_STATES)]
+    if tok("zip", "zipcode", "postal", "postcode"):
+        return f"{10000 + (idx * 61 + salt) % 89999:05d}"
+    if tok("country", "nation"):
+        return _MASK_COUNTRIES[(idx + salt) % len(_MASK_COUNTRIES)]
+
+    # ── Organization / work ─────────────────────────────────────────────────────
+    if tok("company", "employer", "organization", "organisation", "org", "vendor",
+           "supplier", "firm", "business", "merchant", "manufacturer", "distributor"):
+        a = _MASK_COMPANY_A[(idx + salt) % len(_MASK_COMPANY_A)]
+        b = _MASK_COMPANY_B[(idx // len(_MASK_COMPANY_A) + salt) % len(_MASK_COMPANY_B)]
+        return f"{a} {b}"
+    if tok("department", "dept", "division", "team", "unit"):
+        return _MASK_DEPTS[(idx + salt) % len(_MASK_DEPTS)]
+    if tok("title", "role", "position", "job", "occupation", "designation"):
+        lvl  = _MASK_JOB_LEVEL[(idx + salt) % len(_MASK_JOB_LEVEL)]
+        role = _MASK_JOB_ROLE[(idx // len(_MASK_JOB_LEVEL) + salt) % len(_MASK_JOB_ROLE)]
+        return f"{lvl} {role}"
+
+    # ── Person-role columns → a full name (checked after org/location so that
+    #    "company name" / "team name" aren't mistaken for people) ──
+    PERSON_TOKS = {"name", "customer", "client", "user", "person", "guest", "member",
+                   "employee", "staff", "worker", "manager", "supervisor", "operator",
+                   "associate", "rep", "driver", "attendant", "agent", "contact",
+                   "recipient", "owner", "holder", "patient", "doctor", "author",
+                   "applicant", "tenant", "buyer", "seller", "passenger", "player"}
+    if toks & PERSON_TOKS:
+        return f"{first} {last}"
+
+    # ── Money / numbers ─────────────────────────────────────────────────────────
+    if tok("salary", "income", "compensation", "wage", "annual") and not tok("anniversary"):
+        return int(round((35000 + (idx * 1700 + salt * 53) % 145000) / 1000.0) * 1000)
+    MONEY_TOKS = {"price", "cost", "total", "amount", "fee", "charge", "revenue",
+                  "subtotal", "balance", "payment", "deposit", "value"}
+    if toks & MONEY_TOKS:
+        return round(1.99 + (idx * 37 + salt) % 50000 / 100.0, 2)
+    if tok("rate", "percent", "pct", "percentage", "ratio"):
+        return round(((idx * 17 + salt) % 1000) / 10.0, 1)
+    QTY_TOKS = {"qty", "quantity", "count", "units", "stock", "inventory", "amount_of",
+                "level", "score", "points", "rating"}
+    if toks & QTY_TOKS:
+        if tok("rating", "score"):
+            return round(1.0 + (idx * 7 + salt) % 40 / 10.0, 1)
+        return int(1 + (idx * 17 + salt) % 1000)
+
+    # ── Status / categorical ──────────────────────────────────────────────────────
+    if n.startswith("is_") or n.startswith("has_") or n in (
+            "active", "enabled", "verified", "approved", "subscribed"):
+        return bool((idx + salt) % 4 != 0)
+
+    # ── Generic but realistic fallback (never echoes the column name) ────────────
+    return f"{_MASK_GENERIC[(idx + salt) % len(_MASK_GENERIC)]} {chr(65 + (idx // len(_MASK_GENERIC)) % 26)}{(idx * 7 + salt) % 900 + 100}"
+
+
+def _is_na(v) -> bool:
+    """True for None / NaN / NaT — values we leave untouched when masking."""
+    if v is None:
+        return True
+    if isinstance(v, float) and v != v:   # NaN
+        return True
+    return v != v                          # NaT and other "not-equal-to-self" sentinels
+
+
+_PERSON_NAME_TOKENS = {
+    "customer", "client", "user", "person", "guest", "member", "employee", "staff",
+    "worker", "manager", "supervisor", "operator", "associate", "rep", "driver",
+    "attendant", "agent", "contact", "recipient", "owner", "holder", "patient",
+    "doctor", "author", "applicant", "tenant", "buyer", "seller", "passenger", "player",
+}
+
+
+def _mask_strategy_is_identity(ck: str) -> bool:
+    """True when a column must be replaced with freshly invented values (never reusing
+    the originals) because it directly identifies a person or is a sensitive credential."""
+    toks = set(ck.split("_"))
+    def tk(*w): return any(x in toks for x in w)
+    person_name = (
+        ck in {"name", "full_name", "fullname", "first_name", "firstname", "fname",
+               "last_name", "lastname", "lname", "surname", "middle_name", "given_name"}
+        or ("name" in toks and bool(toks & _PERSON_NAME_TOKENS))
+    )
+    return (
+        person_name
+        or tk("email", "mail", "e_mail")
+        or tk("phone", "mobile", "tel", "telephone", "cell", "fax")
+        or tk("ssn", "passport", "iban", "username", "login", "handle", "ip")
+        or tk("license", "licence")
+        or tk("card", "creditcard", "cc", "pan")
+        or (tk("account", "acct") and tk("number", "no", "num", "id"))
+        or tk("address", "street", "addr")
+    )
+
+
+def _coprime_step(m: int) -> int:
+    """A stride coprime with m, so stepping `i*step % m` visits every slot before
+    repeating — gives well-spread, low-collision numeric variety."""
+    if m <= 2:
+        return 1
+    for s in (int(m * 0.618) | 1, 13, 11, 7, 3):
+        if 0 < s < m and math.gcd(s, m) == 1:
+            return s
+    return 1
+
+
+def _build_mask_strategy(col: str, ck: str, values: list) -> dict:
+    """Decide how to mask a column and precompute every distinct value's replacement,
+    keyed by the string form of the original (so the mapping is consistent across rows
+    and tables).
+
+    Strategy, in priority order:
+      • identity   → invent fresh realistic values from large pools (names, emails…)
+      • numeric    → realistic numbers within the column's OWN observed range/type
+                     (e.g. a shirt-number column stays small integers)
+      • categorical (short labels, limited variety) → consistently re-shuffle the
+                     column's own values, so replacements are always real, on-domain
+                     values (e.g. a "lineup" column keeps real lineup values)
+      • fallback   → name-based realistic generator
+    """
+    salt = _mask_salt(ck)
+    # Distinct originals, preserving first-seen order and their real (typed) value.
+    seen: dict[str, object] = {}
+    for v in values:
+        s = str(v)
+        if s not in seen:
+            seen[s] = v
+    distinct = list(seen.items())          # [(str_key, typed_value), ...]
+    n = len(distinct)
+    vmap: dict[str, object] = {}
+
+    if not _mask_strategy_is_identity(ck) and n >= 1:
+        # ── Numeric? Generate within the observed range, matching int/float. ──
+        nums, is_int, all_num = [], True, True
+        for _, v in distinct:
+            try:
+                f = float(str(v).replace(",", "").strip())
+            except (TypeError, ValueError):
+                all_num = False
+                break
+            nums.append(f)
+            if f != int(f):
+                is_int = False
+        if all_num and nums:
+            mn, mx = min(nums), max(nums)
+            if is_int:
+                lo, hi = int(round(mn)), int(round(mx))
+                span = hi - lo
+                if span <= 0:
+                    for s, _ in distinct:
+                        vmap[s] = lo
+                else:
+                    step = _coprime_step(span + 1)
+                    for i, (s, _) in enumerate(distinct):
+                        vmap[s] = lo + ((i * step + salt) % (span + 1))
+            else:
+                span = mx - mn
+                for i, (s, _) in enumerate(distinct):
+                    frac = (i * 0.6180339887 + salt * 0.013) % 1.0
+                    vmap[s] = round(mn + frac * span, 2) if span > 0 else round(mn, 2)
+            return {"vmap": vmap, "kind": "numeric"}
+
+        # ── Categorical short labels → consistent rotation of the column's own values. ──
+        short = all(len(str(v)) <= 40 for _, v in distinct)
+        if 2 <= n <= 200 and short:
+            off   = 1 + (salt % (n - 1))    # 1..n-1 → pure rotation, no fixed points
+            typed = [v for _, v in distinct]
+            for i, (s, _) in enumerate(distinct):
+                vmap[s] = typed[(i + off) % n]
+            return {"vmap": vmap, "kind": "shuffle"}
+
+    # ── Identity, or high-cardinality fallback → invent realistic values. ──
+    for i, (s, _) in enumerate(distinct):
+        vmap[s] = _mask_fake_value(col, i, salt)
+    return {"vmap": vmap, "kind": "pool"}
+
+
+def _mask_dataframes(tables: dict[str, "pd.DataFrame"], mask_cols: set[str],
+                     company_name: str = "") -> tuple[dict[str, "pd.DataFrame"], list[str]]:
+    """Replace the selected columns with realistic fake data, leaving the rest intact.
+
+    `mask_cols` holds the column names to mask, compared case-insensitively. Each
+    column is masked according to what it actually contains (see `_build_mask_strategy`):
+    numbers stay numbers in range, categorical labels stay real on-domain labels, and
+    identity fields get freshly invented values. Replacement is *consistent* — an
+    identical original maps to the same fake value across every row and table, so
+    relationships survive — and the strategy is computed from the union of values
+    across all tables so a shared column masks identically everywhere.
+    """
+    masked_names: list[str] = []
+    out: dict[str, "pd.DataFrame"] = {}
+
+    # Pass 1: gather each masked column's full value domain across every table.
+    domain: dict[str, list]  = {}
+    label:  dict[str, str]   = {}
+    for df in tables.values():
+        for col in df.columns:
+            if str(col).strip().lower() not in mask_cols:
+                continue
+            ck = clean_column_name(col)
+            domain.setdefault(ck, [])
+            label.setdefault(ck, str(col))
+            domain[ck].extend(v for v in df[col].tolist() if not _is_na(v))
+
+    # Build one strategy (with a full original→fake map) per column.
+    strat = {ck: _build_mask_strategy(label[ck], ck, vals) for ck, vals in domain.items()}
+
+    # Pass 2: apply the maps.
+    for tname, df in tables.items():
+        df = df.copy()
+        for col in df.columns:
+            if str(col).strip().lower() not in mask_cols:
+                continue
+            ck = clean_column_name(col)
+            if str(col) not in masked_names:
+                masked_names.append(str(col))
+            vmap = strat[ck]["vmap"]
+            df[col] = [None if _is_na(v) else vmap.get(str(v), v) for v in df[col].tolist()]
+        out[tname] = df
+    return out, masked_names
+
+
+@app.post("/api/inspect-columns")
+async def api_inspect_columns(files: list[UploadFile] = File(...)):
+    """Return each uploaded table's column names so the UI can offer them for masking."""
+    result: dict[str, list[str]] = {}
+    for f in files:
+        stem, df = _read_upload_to_df(f.filename, await f.read())
+        result[stem] = [str(c) for c in df.columns]
+    if not result:
+        raise HTTPException(400, "No files uploaded")
+    return {"tables": result}
+
+
+@app.post("/api/mask")
+async def api_mask(
+    files: list[UploadFile] = File(...),
+    mask_columns: str = Form("[]"),
+    industry: str = Form("misc_retail"),
+    company_name: str = Form(""),
+    company_context: str = Form(""),
+    model: str = Form("claude-sonnet-4-6"),
+):
+    """Ingest an uploaded dataset, replace the chosen sensitive columns with realistic
+    fake values (kept consistent so relationships hold), and keep everything else."""
+    if industry not in INDUSTRIES:
+        raise HTTPException(400, f"Unknown industry: {industry!r}")
+    try:
+        wanted = json.loads(mask_columns) if mask_columns else []
+        if not isinstance(wanted, list):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
+        wanted = [c.strip() for c in mask_columns.split(",") if c.strip()]
+    mask_set = {str(c).strip().lower() for c in wanted}
+
+    tables: dict[str, pd.DataFrame] = {}
+    for f in files:
+        stem, df = _read_upload_to_df(f.filename, await f.read())
+        tables[stem] = df
+    if not tables:
+        raise HTTPException(400, "No files uploaded")
+
+    masked_tables, masked_names = _mask_dataframes(tables, mask_set, company_name.strip())
+
+    try:
+        schema, schema_t, previews, col_renames = snapshot_dfs_to_duckdb(industry, masked_tables)
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+    co_name = company_name.strip()
+    if masked_names:
+        summary = (
+            f"Uploaded dataset ingested with {len(masked_names)} sensitive "
+            f"column(s) masked ({', '.join(masked_names)}). Every other value is preserved "
+            f"exactly as provided, and identical masked values map to the same realistic "
+            f"replacement so relationships across rows and tables stay intact."
+        )
+    else:
+        summary = ("Uploaded dataset ingested unchanged — no columns were selected for masking. "
+                   "Select the sensitive columns to replace them with realistic fake data.")
+    _result_cache[industry] = {
+        "summary":         summary,
+        "schema_text":     schema_t,
+        "company_name":    co_name,
+        "company_context": company_context.strip(),
+    }
+    return {
+        "industry":       industry,
+        "model":          model,
+        "messy":          False,
+        "company_name":   co_name,
+        "schema":         schema,
+        "tables":         previews,
+        "summary":        summary,
+        "column_renames": col_renames,
+        "sources":        {},
+        "num_rows":       None,
+        "num_cols":       None,
+        "custom_columns": None,
+        "masked_columns": masked_names,
+    }
 
 
 @app.get("/")

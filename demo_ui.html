@@ -211,6 +211,46 @@
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
           Upload &amp; Scale
         </button>
+        <button id="srcMask" onclick="setGenMode('mask')"
+          class="quality-pill px-4 py-2 text-sm font-medium text-slate-500 flex items-center gap-2">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.243 4.243L9.88 9.88"/></svg>
+          Mask Data
+        </button>
+      </div>
+
+      <!-- Mask upload section (shown when genMode === 'mask') -->
+      <div id="maskUploadSection" class="hidden space-y-3">
+        <div id="maskDropZone"
+          ondragover="maskDragOver(event)" ondragleave="maskDragLeave(event)" ondrop="maskDrop(event)"
+          onclick="document.getElementById('maskFileInput').click()"
+          onmouseover="this.style.borderColor='#C4522A';this.style.background='rgba(196,82,42,0.04)'"
+          onmouseout="this.style.borderColor='';this.style.background=''"
+          class="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center cursor-pointer transition-all">
+          <svg class="w-8 h-8 text-slate-300 mx-auto mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+          </svg>
+          <p class="text-sm text-slate-500 font-medium">Drop your data files here, or click to browse</p>
+          <p class="text-xs text-slate-400 mt-1">CSV, XLSX, JSON, Parquet — your real data stays local; only the columns you pick are replaced</p>
+        </div>
+        <input type="file" id="maskFileInput" class="hidden" accept=".csv,.xlsx,.xls,.json,.parquet" multiple
+          onchange="maskFilesSelected(event)"/>
+
+        <!-- File list -->
+        <div id="maskFileList" class="hidden space-y-1.5"></div>
+
+        <!-- Column picker (populated after upload) -->
+        <div id="maskColsArea" class="hidden">
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Columns to Mask</label>
+            <span id="maskColsCount" class="text-xs text-slate-400">0 selected</span>
+          </div>
+          <p class="text-xs text-slate-400 mb-2.5">Tick the sensitive columns to replace with realistic fake data. Unticked columns are kept exactly as uploaded, and repeated values stay linked so relationships hold.</p>
+          <div id="maskColsList" class="space-y-3"></div>
+        </div>
+        <div id="maskColsLoading" class="hidden flex items-center gap-2 text-xs text-slate-500">
+          <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+          Reading columns…
+        </div>
       </div>
 
       <!-- SDV upload section (shown when genMode === 'upload') -->
@@ -265,11 +305,18 @@
       </div>
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
-      <!-- Industry -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
+      <!-- Industry (SIC Division) -->
       <div>
         <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Industry</label>
-        <select id="industrySelect"
+        <select id="industrySelect" onchange="onIndustryChange()"
+          class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
+        </select>
+      </div>
+      <!-- Subindustry -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Subindustry</label>
+        <select id="subindustrySelect"
           class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
         </select>
       </div>
@@ -551,9 +598,13 @@ let ctxMode          = 'type';   // 'type' | 'upload'
 let ctxExpanded      = false;
 let sizeMode         = 'auto';   // 'auto' | 'manual'
 let customColsEnabled = false;
-let genMode          = 'ai';     // 'ai' | 'upload'
+let genMode          = 'ai';     // 'ai' | 'upload' | 'mask'
 let sdvFiles         = [];
 let sdvAvailable     = false;
+let maskFiles        = [];
+let maskColsByTable  = {};        // table stem -> [column names]
+let maskSelected     = new Set(); // lowercased column names chosen for masking
+let industryTree     = [];        // [{key,label,subindustries:[{key,label}]}]
 
 const FMT_LABELS = { csv: 'CSV', json: 'JSON', parquet: 'Parquet', txt: 'TXT', xlsx: 'XLSX' };
 const FMT_CLASSES = {
@@ -571,8 +622,10 @@ async function init() {
     const cfg  = await resp.json();
     const iSel = document.getElementById('industrySelect');
     const mSel = document.getElementById('modelSelect');
-    for (const [k, v] of Object.entries(cfg.industries || {}))
-      iSel.add(new Option(v, k));
+    industryTree = cfg.industry_tree || [];
+    for (const div of industryTree)
+      iSel.add(new Option(div.label, div.key));
+    onIndustryChange();   // populate the subindustry dropdown for the first division
     for (const [k, v] of Object.entries(cfg.models || {}))
       mSel.add(new Option(v, k));
   } catch (e) {
@@ -593,6 +646,17 @@ async function init() {
   } catch(e) {}
 }
 init();
+
+// ── Industry → Subindustry dependent dropdown ─────────────────────────
+function onIndustryChange() {
+  const divKey = document.getElementById('industrySelect').value;
+  const sSel   = document.getElementById('subindustrySelect');
+  sSel.innerHTML = '';
+  const div = industryTree.find(d => d.key === divKey);
+  if (!div) return;
+  for (const sub of div.subindustries)
+    sSel.add(new Option(sub.label, sub.key));
+}
 
 // ── Data Quality toggle ───────────────────────────────────────────────
 function setMessy(val) {
@@ -639,28 +703,33 @@ function toggleFmt(fmt) {
 // ── Generation mode ───────────────────────────────────────────────────
 function setGenMode(mode) {
   genMode = mode;
-  const aiBtn  = document.getElementById('srcAI');
-  const sdvBtn = document.getElementById('srcSDV');
-  const sdvSec = document.getElementById('sdvUploadSection');
-  const aiSec  = document.getElementById('aiOnlySections');
-  const label  = document.getElementById('generateBtnLabel');
+  const btns    = { ai: 'srcAI', upload: 'srcSDV', mask: 'srcMask' };
+  const sdvSec  = document.getElementById('sdvUploadSection');
+  const aiSec   = document.getElementById('aiOnlySections');
+  const maskSec = document.getElementById('maskUploadSection');
+  const label   = document.getElementById('generateBtnLabel');
 
-  if (mode === 'ai') {
-    aiBtn.classList.add('selected');
-    if (aiBtn.classList.contains('text-slate-500')) aiBtn.classList.replace('text-slate-500', 'text-slate-700');
-    sdvBtn.classList.remove('selected');
-    if (sdvBtn.classList.contains('text-slate-700')) sdvBtn.classList.replace('text-slate-700', 'text-slate-500');
-    sdvSec.classList.add('hidden');
-    aiSec.classList.remove('hidden');
-    if (label) label.textContent = 'Generate Data';
-  } else {
-    sdvBtn.classList.add('selected');
-    if (sdvBtn.classList.contains('text-slate-500')) sdvBtn.classList.replace('text-slate-500', 'text-slate-700');
-    aiBtn.classList.remove('selected');
-    if (aiBtn.classList.contains('text-slate-700')) aiBtn.classList.replace('text-slate-700', 'text-slate-500');
-    sdvSec.classList.remove('hidden');
-    aiSec.classList.add('hidden');
-    if (label) label.textContent = 'Upload & Scale with SDV';
+  // Toggle the selected pill styling across all three source buttons.
+  for (const [m, id] of Object.entries(btns)) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    if (m === mode) {
+      btn.classList.add('selected');
+      if (btn.classList.contains('text-slate-500')) btn.classList.replace('text-slate-500', 'text-slate-700');
+    } else {
+      btn.classList.remove('selected');
+      if (btn.classList.contains('text-slate-700')) btn.classList.replace('text-slate-700', 'text-slate-500');
+    }
+  }
+
+  aiSec.classList.toggle('hidden',   mode !== 'ai');
+  sdvSec.classList.toggle('hidden',  mode !== 'upload');
+  maskSec.classList.toggle('hidden', mode !== 'mask');
+
+  if (label) {
+    label.textContent = mode === 'upload' ? 'Upload & Scale with SDV'
+                      : mode === 'mask'   ? 'Mask & Generate'
+                      :                     'Generate Data';
   }
 }
 
@@ -712,6 +781,184 @@ function renderSdvFileList() {
     </div>`).join('');
 }
 
+// ── Mask file handling ────────────────────────────────────────────────
+function maskDragOver(e) {
+  e.preventDefault();
+  const dz = document.getElementById('maskDropZone');
+  dz.style.borderColor = '#C4522A';
+  dz.style.background  = 'rgba(196,82,42,0.04)';
+}
+function maskDragLeave(e) {
+  const dz = document.getElementById('maskDropZone');
+  dz.style.borderColor = '';
+  dz.style.background  = '';
+}
+function maskDrop(e) {
+  e.preventDefault();
+  maskDragLeave(e);
+  Array.from(e.dataTransfer.files).forEach(f => addMaskFile(f));
+}
+function maskFilesSelected(e) {
+  Array.from(e.target.files).forEach(f => addMaskFile(f));
+  e.target.value = '';
+}
+function addMaskFile(file) {
+  if (maskFiles.some(f => f.name === file.name && f.size === file.size)) return;
+  maskFiles.push(file);
+  renderMaskFileList();
+  inspectMaskColumns();
+}
+function removeMaskFile(idx) {
+  maskFiles.splice(idx, 1);
+  renderMaskFileList();
+  if (maskFiles.length === 0) {
+    maskColsByTable = {};
+    maskSelected.clear();
+    document.getElementById('maskColsArea').classList.add('hidden');
+  } else {
+    inspectMaskColumns();
+  }
+}
+function renderMaskFileList() {
+  const list = document.getElementById('maskFileList');
+  if (maskFiles.length === 0) { list.classList.add('hidden'); return; }
+  list.classList.remove('hidden');
+  list.innerHTML = maskFiles.map((f, i) => `
+    <div class="flex items-center justify-between px-3 py-2 rounded-xl text-xs" style="background:#FDE8DF;border:1px solid #F5C4B3;">
+      <div class="flex items-center gap-2 min-w-0">
+        <svg class="w-3.5 h-3.5 flex-shrink-0" style="color:#C4522A;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+        <span class="font-medium truncate" style="color:#8B3515;">${esc(f.name)}</span>
+        <span class="text-slate-400 flex-shrink-0">${(f.size / 1024).toFixed(1)} KB</span>
+      </div>
+      <button onclick="removeMaskFile(${i})" class="ml-3 text-slate-400 hover:text-red-500 flex-shrink-0">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>`).join('');
+}
+
+async function inspectMaskColumns() {
+  if (maskFiles.length === 0) return;
+  const area    = document.getElementById('maskColsArea');
+  const loading = document.getElementById('maskColsLoading');
+  area.classList.add('hidden');
+  loading.classList.remove('hidden');
+  try {
+    const fd = new FormData();
+    maskFiles.forEach(f => fd.append('files', f));
+    const resp = await fetch('/api/inspect-columns', { method: 'POST', body: fd });
+    const data = await safeJson(resp);
+    if (!resp.ok) { showError(data.detail || 'Could not read columns.'); return; }
+    maskColsByTable = data.tables || {};
+    // Drop any previously-selected columns that no longer exist in the uploaded files.
+    const present = new Set();
+    Object.values(maskColsByTable).forEach(cols => cols.forEach(c => present.add(c.toLowerCase())));
+    maskSelected.forEach(c => { if (!present.has(c)) maskSelected.delete(c); });
+    renderMaskCols();
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    loading.classList.add('hidden');
+  }
+}
+
+function renderMaskCols() {
+  const area = document.getElementById('maskColsArea');
+  const list = document.getElementById('maskColsList');
+  const tables = Object.entries(maskColsByTable);
+  if (tables.length === 0) { area.classList.add('hidden'); return; }
+  area.classList.remove('hidden');
+  list.innerHTML = tables.map(([tbl, cols]) => `
+    <div>
+      <p class="text-xs font-semibold text-slate-600 mb-1.5">${esc(tbl)}</p>
+      <div class="flex flex-wrap gap-1.5">
+        ${cols.map(c => {
+          const on = maskSelected.has(c.toLowerCase());
+          return `<button type="button" onclick="toggleMaskCol('${esc(c).replace(/'/g, "\\'")}')"
+            class="px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${on
+              ? 'text-white border-transparent'
+              : 'bg-slate-50 text-slate-500 border-slate-200 hover:border-slate-300'}"
+            style="${on ? 'background:#C4522A;' : ''}">
+            ${on ? '✓ ' : ''}${esc(c)}</button>`;
+        }).join('')}
+      </div>
+    </div>`).join('');
+  updateMaskCount();
+}
+
+function toggleMaskCol(col) {
+  const key = col.toLowerCase();
+  if (maskSelected.has(key)) maskSelected.delete(key);
+  else maskSelected.add(key);
+  renderMaskCols();
+}
+
+function updateMaskCount() {
+  document.getElementById('maskColsCount').textContent =
+    `${maskSelected.size} selected`;
+}
+
+async function generateMask() {
+  if (maskFiles.length === 0) {
+    showError('Please upload at least one data file to mask.');
+    return;
+  }
+  if (maskSelected.size === 0) {
+    showError('Select at least one column to mask, or use AI Generate / Upload & Scale instead.');
+    return;
+  }
+  const industry = document.getElementById('subindustrySelect').value;
+  const model    = document.getElementById('modelSelect').value;
+  hideError();
+  showLoading(true);
+  setStep(2);
+
+  const bar   = document.getElementById('progressBar');
+  const steps = [
+    [25, 'Reading uploaded files…',  'Parsing your data'],
+    [55, 'Masking sensitive columns…', 'Generating consistent fake values'],
+    [85, 'Writing to DuckDB…',       'Finalising database'],
+  ];
+  let si = 0;
+  const ticker = setInterval(() => {
+    if (si < steps.length) {
+      const [pct, title, sub] = steps[si++];
+      bar.style.width = pct + '%';
+      document.getElementById('loadingTitle').textContent    = title;
+      document.getElementById('loadingSubtitle').textContent = sub;
+    }
+  }, 900);
+
+  try {
+    const fd = new FormData();
+    maskFiles.forEach(f => fd.append('files', f));
+    fd.append('mask_columns',    JSON.stringify(Array.from(maskSelected)));
+    fd.append('industry',        industry);
+    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
+    fd.append('company_context', (document.getElementById('companyContext').value || '').trim());
+    fd.append('model',           model);
+
+    const resp = await fetch('/api/mask', { method: 'POST', body: fd });
+    clearInterval(ticker);
+    bar.style.width = '100%';
+    const data = await safeJson(resp);
+    if (!resp.ok) {
+      showError(data.detail || 'Masking failed.');
+      showLoading(false);
+      setStep(1);
+      return;
+    }
+    currentData = data;
+    showLoading(false);
+    renderResults(data);
+    setStep(3);
+  } catch (e) {
+    clearInterval(ticker);
+    showError(e.message);
+    showLoading(false);
+    setStep(1);
+  }
+}
+
 // ── Generate ──────────────────────────────────────────────────────────
 function toggleAiScale() {
   const on = document.getElementById('aiScaleToggle').checked;
@@ -721,11 +968,12 @@ function toggleAiScale() {
 }
 
 async function generate() {
+  if (genMode === 'mask')   { return generateMask(); }
   if (genMode === 'upload') { return generateSdv(); }
   if (document.getElementById('aiScaleToggle') &&
       document.getElementById('aiScaleToggle').checked) { return generateAiScale(); }
 
-  const industry = document.getElementById('industrySelect').value;
+  const industry = document.getElementById('subindustrySelect').value;
   const model    = document.getElementById('modelSelect').value;
   hideError();
   showLoading(true);
@@ -790,7 +1038,7 @@ async function generate() {
 }
 
 async function generateAiScale() {
-  const industry   = document.getElementById('industrySelect').value;
+  const industry   = document.getElementById('subindustrySelect').value;
   const model      = document.getElementById('modelSelect').value;
   const scaleRows  = parseInt(document.getElementById('aiScaleRows').value)   || 1000;
   const epochs     = parseInt(document.getElementById('aiScaleEpochs').value) || 50;
@@ -862,7 +1110,7 @@ async function generateSdv() {
     showError('Please upload at least one CSV or Excel file before scaling.');
     return;
   }
-  const industry   = document.getElementById('industrySelect').value;
+  const industry   = document.getElementById('subindustrySelect').value;
   const model      = document.getElementById('modelSelect').value;
   const targetRows = parseInt(document.getElementById('sdvTargetRows').value) || 1000;
   const epochs     = parseInt(document.getElementById('sdvEpochs').value) || 100;
