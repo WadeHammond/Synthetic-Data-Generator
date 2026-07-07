@@ -1809,8 +1809,15 @@ def api_generate(req: GenerateRequest):
                                                                 co_name, co_ctx,
                                                                 req.num_rows, req.num_cols,
                                                                 req.custom_columns)
-        write_postgres(data)
-        schema, schema_t, previews, col_renames = snapshot_to_duckdb(req.industry)
+        try:
+            # Preferred path: LLM → PostgreSQL → DuckDB (the demo's showcase pipeline).
+            write_postgres(data)
+            schema, schema_t, previews, col_renames = snapshot_to_duckdb(req.industry)
+        except psycopg2.OperationalError:
+            # No PostgreSQL reachable (e.g. Azure Container Apps has no PG server) —
+            # write the generated tables straight to DuckDB instead. Same result.
+            schema, schema_t, previews, col_renames = snapshot_dfs_to_duckdb(
+                req.industry, _pg_data_to_dfs(data))
         summary                                 = generate_summary(schema_t, req.model, req.industry,
                                                                    co_name, co_ctx)
         sources = _mock_sources(req.industry)
