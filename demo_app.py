@@ -1492,21 +1492,32 @@ def _sdv_fit_and_sample(
             synth.fit(df)
             out = synth.sample(num_rows=target_rows)
             out = out[[c for c in df.columns if c in out.columns]]  # original column order
-            # GaussianCopula models identifier/code columns as continuous numbers
-            # (e.g. a player_id sampled as 3786350). Reset them: a source-unique id
-            # becomes a clean sequential primary key; a repeated id is resampled from
-            # the real source values so it still looks like a valid reference.
             import numpy as _np
             _rng = _np.random.default_rng()
             for col in out.columns:
-                if _is_identifier_column(col, df[col]):
-                    src = df[col].dropna()
-                    if len(src) == 0:
-                        continue
+                src = df[col].dropna()
+                if len(src) == 0:
+                    continue
+                # GaussianCopula models an id column as a continuous number
+                # (e.g. player_id -> 3786350). Reset ONLY true id-named integer
+                # columns: a source-unique id becomes a clean sequential primary key,
+                # a repeated id is resampled from real values so it stays a valid
+                # reference. Real quantities (attendance, goals, price) are NOT ids
+                # and are left exactly as the model sampled them.
+                cleaned_name = re.sub(r"[^a-z0-9]", "", str(col).lower())
+                is_id_col = (cleaned_name == "id" or cleaned_name.endswith("id")) and _is_integer_like(df[col])
+                if is_id_col:
                     if src.nunique() == len(df):
                         out[col] = list(range(1, len(out) + 1))
                     else:
                         out[col] = _rng.choice(src.to_numpy(), size=len(out), replace=True)
+                    continue
+                # GaussianCopula reproduces the source's missing-value rate, so a
+                # sparse column comes back full of nulls. Fill those gaps with real
+                # values from the source so the scaled dataset is fully populated.
+                if out[col].isna().any():
+                    mask = out[col].isna().to_numpy()
+                    out.loc[mask, col] = _rng.choice(src.to_numpy(), size=int(mask.sum()), replace=True)
             results[tname] = out
         except Exception:
             # Robustness: never fail the whole request over one tricky table.
