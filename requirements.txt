@@ -6,3 +6,4 @@ pandas
 openpyxl
 pyarrow
 litellm
+sdv
