@@ -39,16 +39,12 @@ if not _MOCK_MODE:
             except ImportError:
                 pass
 
-# ── SDV (CTGAN) ──────────────────────────────────────────────────────────────
-_SDV_AVAILABLE = False
-_SdvSTMeta = None
-_CTGAN = None
-try:
-    from sdv.metadata import SingleTableMetadata as _SdvSTMeta
-    from sdv.single_table import CTGANSynthesizer as _CTGAN
-    _SDV_AVAILABLE = True
-except ImportError:
-    pass
+# ── Upload & Scale (SDV) ──────────────────────────────────────────────────────
+# Detect SDV WITHOUT importing it — `import sdv` pulls in heavy dependencies
+# (PyTorch) and must NOT run at container startup (that made the app hang on boot).
+# The scaler imports SDV lazily, only when Upload & Scale actually runs.
+import importlib.util
+_SDV_AVAILABLE = importlib.util.find_spec("sdv") is not None
 
 # ── PostgreSQL config ─────────────────────────────────────────────────────────
 _PG = dict(
@@ -320,14 +316,19 @@ _RETAIL_PRODUCT_PROFILES = [
 ]
 
 
-def _make_row_ctx(variety_idx: int, company_name: str) -> dict:
-    """Return a row-level context dict so related columns (name, category, price) stay consistent."""
-    co = company_name.lower()
-    is_food = any(k in co for k in (
-        "subway", "sandwich", "deli", "restaurant", "cafe", "coffee", "pizza",
-        "burger", "taco", "bakery", "kitchen", "bistro", "grill", "eatery", "dining",
-        "buffet", "fast food", "food", "sub "
-    ))
+def _make_row_ctx(variety_idx: int, company_name: str, force_food: bool | None = None) -> dict:
+    """Return a row-level context dict so related columns (name, category, price) stay
+    consistent. `force_food` overrides the company-name heuristic (e.g. for a restaurant
+    subindustry that should always use a food menu regardless of company name)."""
+    if force_food is None:
+        co = company_name.lower()
+        is_food = any(k in co for k in (
+            "subway", "sandwich", "deli", "restaurant", "cafe", "coffee", "pizza",
+            "burger", "taco", "bakery", "kitchen", "bistro", "grill", "eatery", "dining",
+            "buffet", "fast food", "food", "sub "
+        ))
+    else:
+        is_food = force_food
     profiles = _FOOD_PRODUCT_PROFILES if is_food else _RETAIL_PRODUCT_PROFILES
     name, category, price = profiles[variety_idx % 11]
     return {"item_name": name, "item_category": category, "item_price": price}
@@ -427,12 +428,21 @@ def _make_mock_cell(col: str, row_num: int, variety_idx: int, company_name: str 
         return [150, 320, 80, 450, 220, 380, 90, 510, 175, 295, 230][vi % 11]
     if tok("loyalty") and not tok("name", "card", "program"):
         return [150, 320, 80, 450, 220, 380, 90, 510, 175, 295, 230][vi % 11]
+    if (tok("party", "guests", "guest", "pax", "covers", "occupants", "attendees", "headcount")
+            and not tok("name", "id", "type")):
+        return [2, 4, 3, 6, 2, 5, 8, 2, 4, 3, 7][vi % 11]
     if tok("seat", "seating", "seats") or (tok("capacity") and not tok("storage", "memory", "production")):
         return [24, 36, 18, 48, 30, 42, 20, 55, 28, 40, 33][vi % 11]
-    QTY_TOKS = {"qty", "quantity", "count", "units", "stock", "inventory", "threshold",
-                "level", "limit", "reorder", "remaining", "onhand", "on_hand"}
-    if toks & QTY_TOKS:
+    # Inventory / production counts → large; order-line counts → small (a restaurant
+    # order of "250" makes no sense, but stock-on-hand of 250 does).
+    BIG_QTY_TOKS = {"stock", "inventory", "threshold", "reorder", "onhand", "on_hand",
+                    "hand", "remaining", "produced", "built", "assembled", "completed",
+                    "extracted", "output", "enrollment", "boardings", "impressions"}
+    if toks & BIG_QTY_TOKS:
         return [100, 250, 40, 500, 75, 320, 180, 60, 420, 90, 155][vi % 11]
+    SMALL_QTY_TOKS = {"qty", "quantity", "count", "units", "cases", "pieces", "boxes", "pallets"}
+    if toks & SMALL_QTY_TOKS:
+        return [2, 1, 3, 6, 2, 4, 1, 8, 3, 5, 2][vi % 11]
     if tok("experience", "exp", "yoe", "tenure", "seniority") or \
        (tok("yrs", "years", "yr") and not (toks & DATE_TOKS)):
         return [3, 8, 12, 5, 18, 7, 15, 2, 22, 10, 6][vi % 11]
@@ -696,6 +706,32 @@ def _mock_value(col, row_num, vi, vocab, company_name="", row_ctx=None):
     return _make_mock_cell(col, row_num, vi, company_name, row_ctx)
 
 
+# Subindustries that always represent a food/menu business — force the food profile
+# so a restaurant produces a real menu even when no company name is given.
+_FOOD_SUBINDUSTRIES = {"eating_drinking_places", "food_manufacturing", "food_stores"}
+
+_ITEM_NAME_TOKS = {"item", "product", "menu", "dish", "sandwich", "sub",
+                   "entree", "meal", "goods", "merchandise"}
+
+
+def _is_item_name_col(col: str) -> bool:
+    toks = set(clean_column_name(col).split("_"))
+    return "name" in toks and bool(toks & _ITEM_NAME_TOKS)
+
+
+def _is_item_category_col(col: str) -> bool:
+    """A column that names the category/type/department an item belongs to — should
+    align with the item's name within the same row."""
+    toks = set(clean_column_name(col).split("_"))
+    if toks & {"category", "categories", "department"}:
+        return True
+    return bool(toks & {"type", "kind", "class", "genre"}) and bool(toks & _ITEM_NAME_TOKS)
+
+
+def _table_has_item(cols: list[str]) -> bool:
+    return any(_is_item_name_col(c) for c in cols)
+
+
 # Incremented on every generate_data call so each button press yields different values.
 _gen_call_count: int = 0
 
@@ -724,15 +760,25 @@ def generate_data(industry: str, model: str, messy: bool,
 
         # Build every table fresh from the subindustry's own schema, drawing
         # domain-specific values from its vocab so the data fits the industry.
+        force_food = True if industry in _FOOD_SUBINDUSTRIES else None
         result_tables = []
         for tbl_idx, (tname, cols) in enumerate(entry["tables"]):
             use_cols = cols if num_cols is None else cols[:num_cols]
+            # In an "item" table (one with an item/product/menu name column), the
+            # category column is drawn from the same row profile as the name and
+            # price so the three stay consistent (e.g. a sandwich → "Sandwiches").
+            item_table = _table_has_item(use_cols)
             rows = []
             for i in range(target_rows):
                 vi = call_offset + tbl_idx * target_rows + i
-                row_ctx = _make_row_ctx(vi, company_name)
-                rows.append([_mock_value(c, i + 1, vi, vocab, company_name, row_ctx)
-                             for c in use_cols])
+                row_ctx = _make_row_ctx(vi, company_name, force_food)
+                row = []
+                for c in use_cols:
+                    if item_table and _is_item_category_col(c):
+                        row.append(row_ctx["item_category"])
+                    else:
+                        row.append(_mock_value(c, i + 1, vi, vocab, company_name, row_ctx))
+                rows.append(row)
             disp = [_messify(c) if messy else c for c in use_cols]
             coldefs = [{"name": d, "type": _infer_col_type(c)} for d, c in zip(disp, use_cols)]
             _retype_from_values(coldefs, rows)
@@ -1411,8 +1457,70 @@ def _fix_cross_references(out: pd.DataFrame, src: pd.DataFrame) -> pd.DataFrame:
 def _sdv_fit_and_sample(
     tables: dict[str, pd.DataFrame], target_rows: int, epochs: int = 50
 ) -> dict[str, pd.DataFrame]:
+    """Scale each uploaded table with SDV's GaussianCopulaSynthesizer — a lightweight
+    statistical model (no PyTorch/deep-learning training), so it runs in seconds and
+    fits a small container.
+
+    SDV is imported HERE (lazily), never at module load, so PyTorch is not pulled in
+    at container startup. If SDV is unavailable or cannot model a given table, that
+    table falls back to the block-bootstrap engine so the request never hard-fails.
+    `epochs` is accepted for API compatibility but unused (GaussianCopula doesn't train
+    in epochs)."""
+    try:
+        from sdv.metadata import SingleTableMetadata
+        from sdv.single_table import GaussianCopulaSynthesizer
+    except Exception:
+        # SDV missing or incompatible — scale everything with the bootstrap engine.
+        return _bootstrap_fit_and_sample(tables, target_rows, epochs)
+
+    results: dict[str, pd.DataFrame] = {}
+    for tname, df in tables.items():
+        # Same pre-clean as the bootstrap path: trim strings, drop all-blank columns.
+        df = df.copy()
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+        df = df[[c for c in df.columns if not df[c].isna().all()]]
+        if df.empty:
+            continue
+        df = df.reset_index(drop=True)
+        try:
+            metadata = SingleTableMetadata()
+            metadata.detect_from_dataframe(df)
+            synth = GaussianCopulaSynthesizer(metadata)
+            synth.fit(df)
+            out = synth.sample(num_rows=target_rows)
+            out = out[[c for c in df.columns if c in out.columns]]  # original column order
+            # GaussianCopula models identifier/code columns as continuous numbers
+            # (e.g. a player_id sampled as 3786350). Reset them: a source-unique id
+            # becomes a clean sequential primary key; a repeated id is resampled from
+            # the real source values so it still looks like a valid reference.
+            import numpy as _np
+            _rng = _np.random.default_rng()
+            for col in out.columns:
+                if _is_identifier_column(col, df[col]):
+                    src = df[col].dropna()
+                    if len(src) == 0:
+                        continue
+                    if src.nunique() == len(df):
+                        out[col] = list(range(1, len(out) + 1))
+                    else:
+                        out[col] = _rng.choice(src.to_numpy(), size=len(out), replace=True)
+            results[tname] = out
+        except Exception:
+            # Robustness: never fail the whole request over one tricky table.
+            fb = _bootstrap_fit_and_sample({tname: df}, target_rows, epochs)
+            if tname in fb:
+                results[tname] = fb[tname]
+    return results
+
+
+def _bootstrap_fit_and_sample(
+    tables: dict[str, pd.DataFrame], target_rows: int, epochs: int = 50
+) -> dict[str, pd.DataFrame]:
     """
-    Block-bootstrap synthetic data generation.
+    Block-bootstrap synthetic data generation (fallback engine).
 
     Every output row is sampled as a COMPLETE row from the source data, so all
     within-row relationships are preserved exactly. Independent per-column
