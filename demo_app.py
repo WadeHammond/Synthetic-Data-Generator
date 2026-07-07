@@ -1512,10 +1512,24 @@ def _sdv_fit_and_sample(
                     else:
                         out[col] = _rng.choice(src.to_numpy(), size=len(out), replace=True)
                     continue
-                # GaussianCopula reproduces the source's missing-value rate, so a
-                # sparse column comes back full of nulls. Fill those gaps with real
-                # values from the source so the scaled dataset is fully populated.
-                if out[col].isna().any():
+                # GaussianCopula can badly over-concentrate a categorical or small-count
+                # column — e.g. a value that was 1/12 of the source becomes 42% of the
+                # output, or most of the source's distinct values disappear. When the
+                # output is markedly more dominated than the source, or has collapsed to
+                # far fewer distinct values, resample the column from the source's real
+                # distribution so the variety matches the source (this also fills nulls).
+                src_top      = float(src.value_counts(normalize=True).iloc[0])
+                src_distinct = src.nunique()
+                out_nonnull  = out[col].dropna()
+                out_top      = float(out_nonnull.value_counts(normalize=True).iloc[0]) if len(out_nonnull) else 1.0
+                out_distinct = out_nonnull.nunique()
+                over_concentrated = out_top > src_top * 1.5 and out_top > src_top + 0.08
+                collapsed         = src_distinct >= 4 and out_distinct < max(2, src_distinct // 2)
+                if over_concentrated or collapsed:
+                    # Restore the source's value distribution (realistic variety, no nulls).
+                    out[col] = _rng.choice(src.to_numpy(), size=len(out), replace=True)
+                elif out[col].isna().any():
+                    # Otherwise just fill any nulls the model reproduced.
                     mask = out[col].isna().to_numpy()
                     out.loc[mask, col] = _rng.choice(src.to_numpy(), size=int(mask.sum()), replace=True)
             results[tname] = out
