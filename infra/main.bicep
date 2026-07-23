@@ -13,6 +13,16 @@ param location string = resourceGroup().location
 @description('LLM API key (Anthropic). Leave empty to run in DEMO_MOCK mode without an LLM.')
 param anthropicApiKey string = ''
 
+@secure()
+@description('Azure OpenAI API key. If set (with endpoint), the app uses Azure OpenAI.')
+param azureOpenAiKey string = ''
+
+@description('Azure OpenAI endpoint, e.g. https://<name>.openai.azure.com/')
+param azureOpenAiEndpoint string = ''
+
+@description('Azure OpenAI API version.')
+param azureOpenAiApiVersion string = '2024-10-21'
+
 var resourceToken = toLower(uniqueString(resourceGroup().id, environmentName))
 var tags = { 'azd-env-name': environmentName }
 
@@ -26,6 +36,9 @@ module resources 'resources.bicep' = {
     resourceToken: resourceToken
     tags: tags
     anthropicApiKey: anthropicApiKey
+    azureOpenAiKey: azureOpenAiKey
+    azureOpenAiEndpoint: azureOpenAiEndpoint
+    azureOpenAiApiVersion: azureOpenAiApiVersion
   }
 }
 

@@ -8,10 +8,23 @@ param resourceToken string
 param tags object
 
 @secure()
-@description('LLM API key (Anthropic). Empty => the app runs in DEMO_MOCK mode.')
+@description('LLM API key (Anthropic). Empty => not used.')
 param anthropicApiKey string = ''
 
-var hasKey = !empty(anthropicApiKey)
+@secure()
+@description('Azure OpenAI API key. Empty => not used.')
+param azureOpenAiKey string = ''
+
+@description('Azure OpenAI endpoint, e.g. https://<name>.openai.azure.com/')
+param azureOpenAiEndpoint string = ''
+
+@description('Azure OpenAI API version.')
+param azureOpenAiApiVersion string = '2024-10-21'
+
+var hasAnthropic = !empty(anthropicApiKey)
+var hasAzure = !empty(azureOpenAiKey) && !empty(azureOpenAiEndpoint)
+// Any LLM key present => run against the real LLM (DEMO_MOCK=0).
+var hasKey = hasAnthropic || hasAzure
 // Public placeholder image used only for the initial provision. azd builds the real
 // image from the Dockerfile, pushes it to the registry below, and updates this app.
 var placeholderImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
@@ -99,10 +112,15 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'acr-password'
           value: registry.listCredentials().passwords[0].value
         }
-      ], hasKey ? [
+      ], hasAnthropic ? [
         {
           name: 'anthropic-api-key'
           value: anthropicApiKey
+        }
+      ] : [], hasAzure ? [
+        {
+          name: 'azure-openai-key'
+          value: azureOpenAiKey
         }
       ] : [])
     }
@@ -124,10 +142,23 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'DEMO_MOCK'
               value: hasKey ? '0' : '1'
             }
-          ], hasKey ? [
+          ], hasAnthropic ? [
             {
               name: 'ANTHROPIC_API_KEY'
               secretRef: 'anthropic-api-key'
+            }
+          ] : [], hasAzure ? [
+            {
+              name: 'AZURE_API_KEY'
+              secretRef: 'azure-openai-key'
+            }
+            {
+              name: 'AZURE_API_BASE'
+              value: azureOpenAiEndpoint
+            }
+            {
+              name: 'AZURE_API_VERSION'
+              value: azureOpenAiApiVersion
             }
           ] : [])
         }

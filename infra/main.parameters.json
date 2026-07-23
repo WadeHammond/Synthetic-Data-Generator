@@ -10,6 +10,15 @@
     },
     "anthropicApiKey": {
       "value": "${ANTHROPIC_API_KEY}"
+    },
+    "azureOpenAiKey": {
+      "value": "${AZURE_OPENAI_KEY}"
+    },
+    "azureOpenAiEndpoint": {
+      "value": "${AZURE_OPENAI_ENDPOINT}"
+    },
+    "azureOpenAiApiVersion": {
+      "value": "${AZURE_OPENAI_API_VERSION}"
     }
   }
 }

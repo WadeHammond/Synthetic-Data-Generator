@@ -28,6 +28,9 @@ if not _MOCK_MODE:
     try:
         import litellm as _llm
         _BACKEND = "litellm"
+        # Drop provider-unsupported params instead of erroring (e.g. GPT-5.x on Azure
+        # rejects max_tokens; litellm maps/drops as needed).
+        _llm.drop_params = True
     except ImportError:
         try:
             import anthropic as _anth
@@ -58,11 +61,11 @@ _PG_SCHEMA = "demo"
 _DSN = "host={host} port={port} dbname={dbname} user={user} password={password}".format(**_PG)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+# Model choices offered in the UI. On Azure these map to the deployed Azure OpenAI
+# models; when AZURE_API_BASE is set, _llm_provider_route() routes them via "azure/".
 MODELS = {
-    "claude-sonnet-4-6":         "Claude Sonnet 4.6",
-    "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
-    "gpt-4o":                    "GPT-4o",
-    "gpt-4o-mini":               "GPT-4o Mini",
+    "gpt-5.4":      "GPT-5.4",
+    "gpt-5.4-mini": "GPT-5.4 Mini",
 }
 FILE_FORMATS = ["csv", "json", "parquet", "txt", "xlsx"]
 # ── Industry catalog (SIC divisions → subindustries) ───────────────────────────
@@ -109,7 +112,10 @@ def _mock_sources(subkey: str) -> dict:
 # ── LLM call ─────────────────────────────────────────────────────────────────
 def _llm_provider_route(model: str) -> str:
     """Prefix the model id with its provider so litellm targets the right backend
-    even when its built-in model map predates the model id (e.g. on Azure)."""
+    even when its built-in model map predates the model id. When AZURE_API_BASE is
+    set (Azure OpenAI), route every model through the "azure/<deployment>" form."""
+    if os.getenv("AZURE_API_BASE"):
+        return model if model.startswith("azure/") else f"azure/{model}"
     if model.startswith("claude"):
         return f"anthropic/{model}"
     if model.startswith(("gpt", "o1", "o3", "o4")):
@@ -118,15 +124,21 @@ def _llm_provider_route(model: str) -> str:
 
 
 def _call_llm(model: str, system: str, user: str, max_tokens: int = 8192) -> str:
-    """Call the configured LLM backend. The model menu (Claude Sonnet/Haiku, GPT-4o)
-    all accept `temperature`; do not add Opus 4.7/4.8 or Fable here without removing
-    `temperature`, which those models reject with a 400."""
+    """Call the configured LLM backend. `drop_params`/`max_completion_tokens` are set so
+    this works across providers including Azure GPT-5.x (which rejects `max_tokens`)."""
     if _BACKEND == "litellm":
-        r = _llm.completion(
-            model=_llm_provider_route(model), temperature=0.7, max_tokens=max_tokens,
+        kwargs = dict(
+            model=_llm_provider_route(model), temperature=0.7,
+            max_tokens=max_tokens, max_completion_tokens=max_tokens,
             messages=[{"role": "system", "content": system},
                       {"role": "user",   "content": user}],
         )
+        # Azure OpenAI: pass credentials explicitly so routing is unambiguous.
+        if os.getenv("AZURE_API_BASE"):
+            kwargs["api_key"]     = os.getenv("AZURE_API_KEY")
+            kwargs["api_base"]    = os.getenv("AZURE_API_BASE")
+            kwargs["api_version"] = os.getenv("AZURE_API_VERSION", "2024-10-21")
+        r = _llm.completion(**kwargs)
         return r.choices[0].message.content
     if _BACKEND == "anthropic":
         r = _anth.Anthropic().messages.create(
@@ -2067,7 +2079,7 @@ async def api_upload_and_scale(
     epochs: int = Form(100),
     company_name: str = Form(""),
     company_context: str = Form(""),
-    model: str = Form("gpt-4o"),
+    model: str = Form("gpt-5.4-mini"),
 ):
     if not _SDV_AVAILABLE:
         raise HTTPException(500, "SDV is not installed. Run: pip install sdv")
@@ -2659,7 +2671,7 @@ async def api_mask(
     mask_columns: str = Form("[]"),
     company_name: str = Form(""),
     company_context: str = Form(""),
-    model: str = Form("claude-sonnet-4-6"),
+    model: str = Form("gpt-5.4-mini"),
 ):
     """Ingest an uploaded dataset, replace the chosen sensitive columns with realistic
     fake values (kept consistent so relationships hold), and keep everything else."""
