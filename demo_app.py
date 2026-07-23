@@ -197,23 +197,44 @@ def _messify(col: str) -> str:
     return " ".join(out)
 
 
-def _build_llm_prompt(subkey: str, messy: bool) -> str:
-    """Build a subindustry-tailored instruction describing the desired relational
-    schema, so the LLM produces domain-accurate data for that specific industry."""
+def _build_llm_prompt(subkey: str, messy: bool,
+                      company_name: str = "", company_context: str = "") -> str:
+    """Build the generation instruction. When a company name/description is given, the
+    data is made specific to THAT company (its real-sounding products, locations, staff,
+    prices, codes) rather than generic industry filler; the subindustry supplies the
+    relational schema and domain."""
     entry = _SUB_INDEX[subkey]
     lines = []
     for tname, cols in entry["tables"]:
         disp = [_messify(c) if messy else c for c in cols]
         lines.append(f"  - {tname}({', '.join(disp)})")
     spec = "\n".join(lines)
+
+    co  = (company_name or "").strip()
+    ctx = (company_context or "").strip()
+    if co or ctx:
+        who = co if co else "this company"
+        header = f"You are generating a realistic sample operational database for {who}"
+        if ctx:
+            header += f", which {ctx.rstrip('.')}"
+        header += (
+            f". It is a {entry['label']} business that {entry['blurb']}\n"
+            f"CRITICAL: make EVERY value specific and believable for {who} — the actual "
+            f"kinds of products/services, brand and location names, staff names, prices, "
+            f"dates, statuses and codes that {who} would really have in its systems. If a "
+            f"reader knew {who}, this data should look like a genuine export from their "
+            f"database — never generic placeholders, never data from a different company."
+        )
+    else:
+        header = (f"Generate a realistic {entry['label']} database for a business that "
+                  f"{entry['blurb']}")
+
     return (
-        f"Generate a realistic {entry['label']} database for a business that "
-        f"{entry['blurb']}\n"
+        f"{header}\n"
         f"Use these relational tables and columns as the schema (preserve the "
         f"foreign-key links so the tables join correctly):\n{spec}\n"
-        f"Populate every column with values that are domain-accurate and realistic "
-        f"for this specific industry — names, dates, amounts, categories, and codes "
-        f"should all look like genuine {entry['label']} data, never placeholders."
+        f"Populate every column with domain-accurate, realistic values — names, dates, "
+        f"amounts, categories, and codes must look like genuine records, never placeholders."
     )
 
 
@@ -800,13 +821,7 @@ def generate_data(industry: str, model: str, messy: bool,
     base   = _GEN_SYSTEM_MESSY_BASE if messy else _GEN_SYSTEM_CLEAN_BASE
     system = base + ("\n" + "\n".join(constraints) if constraints else "")
 
-    prompt = _build_llm_prompt(industry, messy)
-    if company_name or company_context:
-        intro = f"This database is for {company_name}" if company_name else "This database is for a company"
-        if company_context:
-            intro += f", which {company_context.strip().rstrip('.')}"
-        prompt = (f"{intro}.\n{prompt}\n"
-                  "Tailor all values, names, amounts, and dates to be realistic for this specific company.")
+    prompt = _build_llm_prompt(industry, messy, company_name, company_context)
     raw = _call_llm(model, system, prompt)
     return json.loads(_extract_json(raw))
 
@@ -2050,15 +2065,14 @@ async def api_upload_and_scale(
     files: list[UploadFile] = File(...),
     scale_rows: int = Form(1000),
     epochs: int = Form(100),
-    industry: str = Form("misc_retail"),
     company_name: str = Form(""),
     company_context: str = Form(""),
     model: str = Form("gpt-4o"),
 ):
     if not _SDV_AVAILABLE:
         raise HTTPException(500, "SDV is not installed. Run: pip install sdv")
-    if industry not in INDUSTRIES:
-        raise HTTPException(400, f"Unknown industry: {industry!r}")
+    # Uploaded data isn't tied to a catalog industry — use a fixed project key.
+    industry = "scaled_data"
     scale_rows = max(100, min(scale_rows, 100_000))
     epochs     = max(10,  min(epochs, 500))
 
@@ -2468,19 +2482,50 @@ def _coprime_step(m: int) -> int:
     return 1
 
 
-def _build_mask_strategy(col: str, ck: str, values: list) -> dict:
+def _llm_mask_pool(col: str, samples: list, n: int, model: str) -> list:
+    """Ask the LLM for a pool of realistic FAKE values that match a column's real
+    sample values (same kind/format/style), for data masking. Returns [] on any
+    failure so callers can fall back to a non-LLM strategy."""
+    n = max(6, min(int(n), 60))
+    sample_str = "; ".join(str(s) for s in samples[:20] if str(s).strip())
+    if not sample_str:
+        return []
+    system = ("You generate realistic synthetic replacement values for data masking. "
+              'Return ONLY raw JSON of the form {"values": ["...", "..."]} — no prose, '
+              "no code fences.")
+    user = (
+        f'Column name: "{col}"\n'
+        f"Real example values from this column:\n{sample_str}\n\n"
+        f"Produce {n} realistic, believable FAKE values for THIS column. They must match "
+        f"the SAME kind of thing, format, length and style as the examples (e.g. company "
+        f"names → other realistic company names; product SKUs → same-format SKUs; city "
+        f"names → other real cities; email addresses → realistic emails). The fakes must "
+        f"look like genuine values for this column but must NOT reuse any example value. "
+        f'Return JSON: {{"values": [{n} distinct strings]}}.'
+    )
+    try:
+        raw = _call_llm(model, system, user, max_tokens=2048)
+        obj = json.loads(_extract_json(raw))
+        vals = obj.get("values") if isinstance(obj, dict) else None
+        cleaned = [str(x).strip() for x in vals if str(x).strip()] if isinstance(vals, list) else []
+        return cleaned
+    except Exception:
+        return []
+
+
+def _build_mask_strategy(col: str, ck: str, values: list, model: str = "") -> dict:
     """Decide how to mask a column and precompute every distinct value's replacement,
     keyed by the string form of the original (so the mapping is consistent across rows
     and tables).
 
     Strategy, in priority order:
-      • identity   → invent fresh realistic values from large pools (names, emails…)
-      • numeric    → realistic numbers within the column's OWN observed range/type
-                     (e.g. a shirt-number column stays small integers)
-      • categorical (short labels, limited variety) → consistently re-shuffle the
-                     column's own values, so replacements are always real, on-domain
-                     values (e.g. a "lineup" column keeps real lineup values)
-      • fallback   → name-based realistic generator
+      • numeric (non-identity) → realistic numbers within the column's OWN observed
+                                 range/type (no LLM needed)
+      • LLM               → realistic FAKE values that match the column's real samples
+                            in kind/format/style (the main path when an LLM is present)
+      • categorical/text  → offline fallback: rotate the column's own real values so the
+                            replacements are always on-domain and realistic
+      • identity          → invent fresh fake values from name/contact pools
     """
     salt = _mask_salt(ck)
     # Distinct originals, preserving first-seen order and their real (typed) value.
@@ -2492,9 +2537,10 @@ def _build_mask_strategy(col: str, ck: str, values: list) -> dict:
     distinct = list(seen.items())          # [(str_key, typed_value), ...]
     n = len(distinct)
     vmap: dict[str, object] = {}
+    is_identity = _mask_strategy_is_identity(ck)
 
-    if not _mask_strategy_is_identity(ck) and n >= 1:
-        # ── Numeric? Generate within the observed range, matching int/float. ──
+    # ── Numeric (non-identity) → keep within the observed range. Realistic; no LLM. ──
+    if not is_identity and n >= 1:
         nums, is_int, all_num = [], True, True
         for _, v in distinct:
             try:
@@ -2524,23 +2570,34 @@ def _build_mask_strategy(col: str, ck: str, values: list) -> dict:
                     vmap[s] = round(mn + frac * span, 2) if span > 0 else round(mn, 2)
             return {"vmap": vmap, "kind": "numeric"}
 
-        # ── Categorical short labels → consistent rotation of the column's own values. ──
-        short = all(len(str(v)) <= 40 for _, v in distinct)
-        if 2 <= n <= 200 and short:
-            off   = 1 + (salt % (n - 1))    # 1..n-1 → pure rotation, no fixed points
-            typed = [v for _, v in distinct]
+    # ── Text/identity → ask the LLM for realistic, domain-fitting fake values. ──
+    if model and _BACKEND is not None:
+        pool = _llm_mask_pool(col, [v for _, v in distinct], min(max(n, 8), 60), model)
+        # Only use it if the model returned enough genuinely-new values.
+        originals = {s for s, _ in distinct}
+        fresh = [p for p in dict.fromkeys(pool) if p not in originals]
+        if len(fresh) >= min(6, n):
             for i, (s, _) in enumerate(distinct):
-                vmap[s] = typed[(i + off) % n]
-            return {"vmap": vmap, "kind": "shuffle"}
+                vmap[s] = fresh[i % len(fresh)]
+            return {"vmap": vmap, "kind": "llm"}
 
-    # ── Identity, or high-cardinality fallback → invent realistic values. ──
+    # ── Offline fallback. ──
+    if not is_identity and n >= 2:
+        # Rotate the column's own real values → always on-domain and realistic.
+        off   = 1 + (salt % (n - 1))       # 1..n-1 → pure rotation, no fixed points
+        typed = [v for _, v in distinct]
+        for i, (s, _) in enumerate(distinct):
+            vmap[s] = typed[(i + off) % n]
+        return {"vmap": vmap, "kind": "shuffle"}
+
+    # Identity (or single-value) → invent fresh fakes from name/contact pools.
     for i, (s, _) in enumerate(distinct):
         vmap[s] = _mask_fake_value(col, i, salt)
     return {"vmap": vmap, "kind": "pool"}
 
 
 def _mask_dataframes(tables: dict[str, "pd.DataFrame"], mask_cols: set[str],
-                     company_name: str = "") -> tuple[dict[str, "pd.DataFrame"], list[str]]:
+                     model: str = "", company_name: str = "") -> tuple[dict[str, "pd.DataFrame"], list[str]]:
     """Replace the selected columns with realistic fake data, leaving the rest intact.
 
     `mask_cols` holds the column names to mask, compared case-insensitively. Each
@@ -2567,7 +2624,7 @@ def _mask_dataframes(tables: dict[str, "pd.DataFrame"], mask_cols: set[str],
             domain[ck].extend(v for v in df[col].tolist() if not _is_na(v))
 
     # Build one strategy (with a full original→fake map) per column.
-    strat = {ck: _build_mask_strategy(label[ck], ck, vals) for ck, vals in domain.items()}
+    strat = {ck: _build_mask_strategy(label[ck], ck, vals, model) for ck, vals in domain.items()}
 
     # Pass 2: apply the maps.
     for tname, df in tables.items():
@@ -2600,15 +2657,14 @@ async def api_inspect_columns(files: list[UploadFile] = File(...)):
 async def api_mask(
     files: list[UploadFile] = File(...),
     mask_columns: str = Form("[]"),
-    industry: str = Form("misc_retail"),
     company_name: str = Form(""),
     company_context: str = Form(""),
     model: str = Form("claude-sonnet-4-6"),
 ):
     """Ingest an uploaded dataset, replace the chosen sensitive columns with realistic
     fake values (kept consistent so relationships hold), and keep everything else."""
-    if industry not in INDUSTRIES:
-        raise HTTPException(400, f"Unknown industry: {industry!r}")
+    # Uploaded data isn't tied to a catalog industry — use a fixed project key.
+    industry = "masked_data"
     try:
         wanted = json.loads(mask_columns) if mask_columns else []
         if not isinstance(wanted, list):
@@ -2624,7 +2680,7 @@ async def api_mask(
     if not tables:
         raise HTTPException(400, "No files uploaded")
 
-    masked_tables, masked_names = _mask_dataframes(tables, mask_set, company_name.strip())
+    masked_tables, masked_names = _mask_dataframes(tables, mask_set, model, company_name.strip())
 
     try:
         schema, schema_t, previews, col_renames = snapshot_dfs_to_duckdb(industry, masked_tables)

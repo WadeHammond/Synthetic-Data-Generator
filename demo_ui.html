@@ -307,14 +307,14 @@
 
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
       <!-- Industry (SIC Division) -->
-      <div>
+      <div id="industryField">
         <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Industry</label>
         <select id="industrySelect" onchange="onIndustryChange()"
           class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
         </select>
       </div>
       <!-- Subindustry -->
-      <div>
+      <div id="subindustryField">
         <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Subindustry</label>
         <select id="subindustrySelect"
           class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-800 bg-white focus:outline-none focus:outline-none focus:ring-2 focus:ring-[#C4522A]">
@@ -726,6 +726,12 @@ function setGenMode(mode) {
   sdvSec.classList.toggle('hidden',  mode !== 'upload');
   maskSec.classList.toggle('hidden', mode !== 'mask');
 
+  // Industry / Subindustry only apply to AI generation — hide them for uploaded data.
+  const industryField    = document.getElementById('industryField');
+  const subindustryField = document.getElementById('subindustryField');
+  if (industryField)    industryField.classList.toggle('hidden',    mode !== 'ai');
+  if (subindustryField) subindustryField.classList.toggle('hidden', mode !== 'ai');
+
   if (label) {
     label.textContent = mode === 'upload' ? 'Upload & Scale with SDV'
                       : mode === 'mask'   ? 'Mask & Generate'
@@ -931,9 +937,7 @@ async function generateMask() {
   try {
     const fd = new FormData();
     maskFiles.forEach(f => fd.append('files', f));
-    fd.append('mask_columns',    JSON.stringify(Array.from(maskSelected)));
-    fd.append('industry',        industry);
-    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
+    fd.append('mask_columns',    JSON.stringify(Array.from(maskSelected)));    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
     fd.append('company_context', (document.getElementById('companyContext').value || '').trim());
     fd.append('model',           model);
 
@@ -1138,9 +1142,7 @@ async function generateSdv() {
     const fd = new FormData();
     sdvFiles.forEach(f => fd.append('files', f));
     fd.append('scale_rows',      targetRows);
-    fd.append('epochs',          epochs);
-    fd.append('industry',        industry);
-    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
+    fd.append('epochs',          epochs);    fd.append('company_name',    (document.getElementById('companyName').value    || '').trim());
     fd.append('company_context', (document.getElementById('companyContext').value || '').trim());
     fd.append('model',           model);
 
