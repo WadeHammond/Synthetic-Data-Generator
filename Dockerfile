@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
  && pip install --no-cache-dir -r requirements.txt
 
 # Application code (demo_app.py, data_layer.py, demo_ui.html, fixtures).
+# cache-bust: bump this token to force the code layer (and everything after) to
+# rebuild, so app changes always ship even when the remote build cache is warm.
+ARG CODE_REV=3
+RUN echo "code-rev ${CODE_REV}"
 COPY . .
 
 # DuckDB databases are written here at runtime; create it so the app can write
