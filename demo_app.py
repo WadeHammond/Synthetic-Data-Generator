@@ -123,21 +123,45 @@ def _llm_provider_route(model: str) -> str:
     return model
 
 
-def _call_llm(model: str, system: str, user: str, max_tokens: int = 8192) -> str:
-    """Call the configured LLM backend. `drop_params`/`max_completion_tokens` are set so
-    this works across providers including Azure GPT-5.x (which rejects `max_tokens`)."""
+def _call_llm(model: str, system: str, user: str, max_tokens: int = 8192,
+              json_mode: bool = False) -> str:
+    """Call the configured LLM backend. Set json_mode=True to force syntactically-valid
+    JSON output (only for prompts that ask for JSON — the prompt must contain 'JSON')."""
+    # ── Azure OpenAI: call the REST endpoint directly. This is the most reliable path
+    # for Azure GPT-5.x — it uses `max_completion_tokens` (GPT-5.x rejects `max_tokens`)
+    # and avoids litellm's azure param handling, which was silently capping output. ──
+    azure_base = os.getenv("AZURE_API_BASE")
+    if azure_base:
+        import urllib.request
+        base = azure_base.rstrip("/")
+        ver  = os.getenv("AZURE_API_VERSION", "2024-10-21")
+        url  = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
+        body = {
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "temperature": 0.7,
+            "max_completion_tokens": max_tokens,
+        }
+        if json_mode:
+            # Guarantees valid JSON (GPT-5.x otherwise occasionally drops a bracket in
+            # large one-shot JSON). Requires "JSON" to appear in the prompt.
+            body["response_format"] = {"type": "json_object"}
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
+            "api-key": os.getenv("AZURE_API_KEY", ""),
+            "Content-Type": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read())
+        return data["choices"][0]["message"]["content"]
+
     if _BACKEND == "litellm":
         kwargs = dict(
-            model=_llm_provider_route(model), temperature=0.7,
-            max_tokens=max_tokens, max_completion_tokens=max_tokens,
+            model=_llm_provider_route(model), temperature=0.7, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system},
                       {"role": "user",   "content": user}],
         )
-        # Azure OpenAI: pass credentials explicitly so routing is unambiguous.
-        if os.getenv("AZURE_API_BASE"):
-            kwargs["api_key"]     = os.getenv("AZURE_API_KEY")
-            kwargs["api_base"]    = os.getenv("AZURE_API_BASE")
-            kwargs["api_version"] = os.getenv("AZURE_API_VERSION", "2024-10-21")
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
         r = _llm.completion(**kwargs)
         return r.choices[0].message.content
     if _BACKEND == "anthropic":
@@ -834,7 +858,7 @@ def generate_data(industry: str, model: str, messy: bool,
     system = base + ("\n" + "\n".join(constraints) if constraints else "")
 
     prompt = _build_llm_prompt(industry, messy, company_name, company_context)
-    raw = _call_llm(model, system, prompt)
+    raw = _call_llm(model, system, prompt, json_mode=True)
     return json.loads(_extract_json(raw))
 
 
@@ -2516,7 +2540,7 @@ def _llm_mask_pool(col: str, samples: list, n: int, model: str) -> list:
         f'Return JSON: {{"values": [{n} distinct strings]}}.'
     )
     try:
-        raw = _call_llm(model, system, user, max_tokens=2048)
+        raw = _call_llm(model, system, user, max_tokens=2048, json_mode=True)
         obj = json.loads(_extract_json(raw))
         vals = obj.get("values") if isinstance(obj, dict) else None
         cleaned = [str(x).strip() for x in vals if str(x).strip()] if isinstance(vals, list) else []
